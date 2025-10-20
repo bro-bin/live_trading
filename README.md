@@ -1,21 +1,23 @@
 # live_trading
-live_trading.py에서 시그널에 따라 매매 실행
+LiveTrading.py에서 시그널에 따라 매매 실행
 
-매매함수는 trading_function.py에 모여있음
+매매함수는 TradingFunction.py에 모여있음
  1) buy_etf
  2) sell_etf
  3) buy_basket
  4) sell_basket
+ 5) all_clear 장마감시 일괄매도
 
-get_rate.py에서 basket 실제 비중 금액까지 도출한 상태인데 웹소켓 이슈로 실제 값은 안나옴
+ GetBasketQty는 TradingFunction을 위한 모듈
 
-MJ가 해줄일: 거기서 나온 실제 비중금액으로make_basket에서 basket 정수수량까지 도출하면 됨.
---------------------------------------------------------------
+---------------------------시그널-----------------------------
 시가 - nav > 2 시그마 : 바스켓 매수(ETF가 과평가 구간)
 시가 - nav < -2 시그마 : ETF 매수
 
-공매도가 안되기 때문에 하나의 포지션만 매수
-
+*공매도가 안되기 때문에 하나의 포지션만 매수
 *2시그마를 2로 가정. 평균을 0으로 가정
 --------------------------------------------------------------
-1. 매수 
+10/21 남은 할 일
+1. TradingFunction.py의 buy_basket() 호출시 웹소켓 초기화 하는 현상 발생. 기존 웹소켓으로 연결하게 수정.
+2. TradingFunction.py의 get_hashkey() 필요 없으면 삭제
+3. 장종료시 일괄매도 함수 all_clear()구현
