@@ -20,5 +20,4 @@ LiveTrading.py에서 시그널에 따라 매매 실행
 
 10/21 남은 할 일
 1. TradingFunction.py의 buy_basket() 호출시 웹소켓 초기화 하는 현상 발생. 기존 웹소켓으로 연결하게 수정.
-2. TradingFunction.py의 get_hashkey() 필요 없으면 삭제
-3. 장종료시 일괄매도 함수 all_clear()구현
+2. 장종료시 일괄매도 함수 all_clear()구현

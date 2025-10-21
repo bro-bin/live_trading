@@ -5,7 +5,7 @@ import time
 import threading
 import yaml
 from datetime import datetime
-from TradingFunction import buy_etf, sell_etf, buy_basket, sell_basket
+from TradingFunction import buy_etf, sell_etf, buy_basket, sell_basket, all_clear
 
 # ==============================================================================
 # ========== 설정 불러오기 (Configuration) ==========
@@ -31,6 +31,9 @@ WS_URL = "ws://ops.koreainvestment.com:21000" if IS_REAL else "ws://ops.koreainv
 STOCK_CODE = "102780"  # KODEX 삼성그룹
 STOCK_NAME = "KODEX 삼성그룹"
 
+# --- 장마감 시간 설정 ---
+MARKET_CLOSE_TIME = "15:30:00"  # 장마감 시간
+
 # ==============================================================================
 # ========== 전역 변수 (Global Variables) ==========
 # ==============================================================================
@@ -50,6 +53,9 @@ position = "none"
 
 # API 접근 토큰
 ACCESS_TOKEN = None
+
+# 프로그램 종료 플래그
+should_exit = False
 
 # ==============================================================================
 # ========== 1. 한국투자증권 REST API (매매 및 조회) ==========
@@ -220,21 +226,53 @@ def on_open(ws):
 # ==============================================================================
 def run_trading_logic():
     """1초마다 NAV와 현재가를 비교하여 매매 조건을 확인하고 실행하는 함수"""
-    global position
+    global position, should_exit
     
     # TR_ID 설정 (모의투자/실전투자)
     buy_tr_id = "VTTC0802U" if not IS_REAL else "TTTC0802U"
     sell_tr_id = "VTTC0801U" if not IS_REAL else "TTTC0801U"
     
-    while True:
+    while not should_exit:
         time.sleep(1)  # 1초 대기
+        
+        # 현재 시간 확인
+        now = datetime.now()
+        current_time_str = now.strftime('%H:%M:%S')
+        
+        # 장마감 시간(15:30:00) 체크
+        if current_time_str >= MARKET_CLOSE_TIME:
+            print("\n" + "=" * 80)
+            print(f"⏰ 장마감 시간({MARKET_CLOSE_TIME})이 되었습니다.")
+            print("🧹 전체 포지션 청산을 시작합니다...")
+            print("=" * 80)
+            
+            # 전체 청산 실행
+            result = all_clear(
+                access_token=ACCESS_TOKEN,
+                base_url=BASE_URL,
+                app_key=APP_KEY,
+                app_secret=APP_SECRET,
+                account_no=ACCOUNT_NO,
+                tr_id=sell_tr_id,
+                delay=0.5
+            )
+            
+            if result:
+                print("\n✅ 장마감 청산 완료")
+                print(f"📊 청산 결과: 성공 {len(result.get('success', []))}건 / 실패 {len(result.get('failed', []))}건")
+            else:
+                print("\n⚠️ 장마감 청산 중 오류 발생")
+            
+            # 프로그램 종료 플래그 설정
+            should_exit = True
+            print("\n👋 프로그램을 종료합니다.")
+            break
         
         nav = realtime_data.get("nav")
         price = realtime_data.get("current_price")
         
         # 현재 상태 출력
-        now_str = datetime.now().strftime('%H:%M:%S')
-        print(f"\n[{now_str}] 현재 포지션: {position.upper()}")
+        print(f"\n[{current_time_str}] 현재 포지션: {position.upper()}")
         print(f"  - NAV      : {nav if nav is not None else '수신 대기 중...'}")
         print(f"  - 현재가   : {price if price is not None else '수신 대기 중...'}")
         
@@ -288,7 +326,7 @@ def run_trading_logic():
                     app_secret=APP_SECRET,
                     account_no=ACCOUNT_NO,
                     stock_code=STOCK_CODE,
-                    quantity=1,
+                    quantity=2500,
                     stock_name=STOCK_NAME,
                     tr_id=buy_tr_id
                 )
@@ -306,7 +344,7 @@ def run_trading_logic():
                     app_secret=APP_SECRET,
                     account_no=ACCOUNT_NO,
                     stock_code=STOCK_CODE,
-                    quantity=1,
+                    quantity=2500,
                     stock_name=STOCK_NAME,
                     tr_id=sell_tr_id
                 )
@@ -323,6 +361,7 @@ if __name__ == "__main__":
     print("=== 자동 ETF 괴리율 매매 프로그램을 시작합니다 ===")
     print(f"=== 대상 종목: {STOCK_NAME} ({STOCK_CODE}) ===")
     print(f"=== 실행 환경: {'실전투자' if IS_REAL else '모의투자'} ===")
+    print(f"=== 장마감 청산 시간: {MARKET_CLOSE_TIME} ===")
     print("=" * 60)
     
     # 1. API 접근 토큰 발급
@@ -336,7 +375,7 @@ if __name__ == "__main__":
     trading_thread = threading.Thread(target=run_trading_logic, daemon=True)
     trading_thread.start()
     
-    # 4. 메인 스레드에서 웹소켓 실행 (한 번만 연결)
+    # 4. 메인 스레드에서 웹소켓 실행
     print("\n📡 웹소켓 연결 시작...")
     ws = websocket.WebSocketApp(
         WS_URL,
@@ -345,4 +384,17 @@ if __name__ == "__main__":
         on_close=on_close,
         on_open=on_open
     )
-    ws.run_forever()
+    
+    # 웹소켓을 별도 스레드에서 실행
+    ws_thread = threading.Thread(target=ws.run_forever, daemon=True)
+    ws_thread.start()
+    
+    # 5. 메인 루프에서 종료 플래그 확인
+    try:
+        while not should_exit:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n\n⚠️ 사용자가 프로그램을 중단했습니다.")
+    finally:
+        ws.close()
+        print("프로그램이 종료되었습니다.")
