@@ -4,6 +4,7 @@ import json
 import time
 import threading
 import yaml
+import pandas as pd
 from datetime import datetime
 from TradingFunction import buy_etf, sell_etf, buy_basket, sell_basket, all_clear
 
@@ -56,6 +57,148 @@ ACCESS_TOKEN = None
 
 # 프로그램 종료 플래그
 should_exit = False
+
+# 거래 기록 저장
+trade_history = []
+
+# 현재 보유 중인 포지션의 매수 금액 및 상세 정보
+current_position_info = {
+    "type": None,  # "etf" or "basket"
+    "buy_amount": 0,  # 총 매수 금액
+    "buy_time": None,  # 매수 시간
+    "buy_details": {}  # 매수 상세 (바스켓의 경우 종목별 정보)
+}
+
+# ==============================================================================
+# ========== 거래 기록 관리 함수 ==========
+# ==============================================================================
+def save_trade_history():
+    """거래 기록을 CSV 파일로 저장"""
+    if not trade_history:
+        print("\n📝 저장할 거래 기록이 없습니다.")
+        return
+    
+    # DataFrame으로 변환
+    df = pd.DataFrame(trade_history)
+    
+    # 파일명에 날짜 포함
+    filename = f"trade_history_{datetime.now().strftime('%Y%m%d')}.csv"
+    df.to_csv(filename, index=False, encoding='utf-8-sig')
+    
+    print(f"\n✅ 거래 기록이 저장되었습니다: {filename}")
+    print(f"📊 총 {len(trade_history)}건의 거래 기록")
+    
+    # 통계 출력
+    if len(trade_history) > 0:
+        avg_return = df['수익률(%)'].mean()
+        total_trades = len(df)
+        profitable_trades = len(df[df['수익률(%)'] > 0])
+        
+        print(f"\n📈 거래 통계:")
+        print(f"   - 평균 수익률: {avg_return:.2f}%")
+        print(f"   - 총 거래 횟수: {total_trades}회")
+        print(f"   - 수익 거래: {profitable_trades}회")
+        print(f"   - 손실 거래: {total_trades - profitable_trades}회")
+        print(f"   - 승률: {(profitable_trades/total_trades*100):.1f}%")
+
+
+def record_buy(position_type, buy_amount, details=None):
+    """매수 기록"""
+    global current_position_info
+    
+    current_position_info = {
+        "type": position_type,
+        "buy_amount": buy_amount,
+        "buy_time": datetime.now(),
+        "buy_details": details if details else {}
+    }
+    
+    print(f"\n📝 매수 기록: {position_type.upper()} / 금액: {buy_amount:,}원")
+
+
+def record_sell(sell_amount, details=None):
+    """매도 기록 및 수익률 계산"""
+    global current_position_info, trade_history
+    
+    if current_position_info["type"] is None:
+        print("\n⚠️ 매수 기록이 없어 수익률을 계산할 수 없습니다.")
+        return
+    
+    buy_amount = current_position_info["buy_amount"]
+    profit = sell_amount - buy_amount
+    return_rate = (profit / buy_amount) * 100
+    
+    # 거래 기록 추가
+    trade_record = {
+        "거래일시": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        "포지션": current_position_info["type"].upper(),
+        "매수시간": current_position_info["buy_time"].strftime('%Y-%m-%d %H:%M:%S'),
+        "매도시간": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        "매수금액": buy_amount,
+        "매도금액": sell_amount,
+        "손익": profit,
+        "수익률(%)": round(return_rate, 2)
+    }
+    
+    trade_history.append(trade_record)
+    
+    # 콘솔 출력
+    print(f"\n{'='*80}")
+    print(f"💰 매도 완료 - 수익률 기록")
+    print(f"{'='*80}")
+    print(f"   포지션: {current_position_info['type'].upper()}")
+    print(f"   매수금액: {buy_amount:,}원")
+    print(f"   매도금액: {sell_amount:,}원")
+    print(f"   손익: {profit:+,}원")
+    print(f"   수익률: {return_rate:+.2f}%")
+    print(f"{'='*80}")
+    
+    # 현재 포지션 정보 초기화
+    current_position_info = {
+        "type": None,
+        "buy_amount": 0,
+        "buy_time": None,
+        "buy_details": {}
+    }
+
+
+def calculate_basket_amount(result_dict):
+    """바스켓 매매 결과에서 총 금액 계산"""
+    if not result_dict or "success" not in result_dict:
+        return 0
+    
+    # GetBasketQty에서 실시간 가격 가져오기
+    from GetBasketQty import _client
+    
+    if _client is None:
+        print("⚠️ 실시간 가격 정보를 가져올 수 없습니다.")
+        return 0
+    
+    live_prices = _client.get_current_prices()
+    total_amount = 0
+    
+    for item in result_dict["success"]:
+        stock_name = item["stock_name"]
+        quantity = item["quantity"]
+        
+        if stock_name in live_prices:
+            price = live_prices[stock_name]["price"]
+            total_amount += price * quantity
+        else:
+            print(f"⚠️ {stock_name}의 실시간 가격을 찾을 수 없습니다.")
+    
+    return total_amount
+
+
+def calculate_etf_amount(quantity):
+    """ETF 매매 금액 계산"""
+    price = realtime_data.get("current_price")
+    if price is None:
+        print("⚠️ ETF 현재가 정보를 가져올 수 없습니다.")
+        return 0
+    
+    return price * quantity
+
 
 # ==============================================================================
 # ========== 1. 한국투자증권 REST API (매매 및 조회) ==========
@@ -258,10 +401,34 @@ def run_trading_logic():
             )
             
             if result:
-                print("\n✅ 장마감 청산 완료")
+                print(f"\n✅ 장마감 청산 완료")
                 print(f"📊 청산 결과: 성공 {len(result.get('success', []))}건 / 실패 {len(result.get('failed', []))}건")
+                
+                # 청산 시 수익률 기록 (포지션이 있었다면)
+                if current_position_info["type"] is not None:
+                    # 청산 금액 계산
+                    sell_amount = 0
+                    for item in result.get('success', []):
+                        # 실시간 가격으로 계산 (근사치)
+                        if item['stock_code'] == STOCK_CODE:
+                            # ETF
+                            sell_amount = calculate_etf_amount(item['quantity'])
+                        else:
+                            # 바스켓 종목들
+                            from GetBasketQty import _client
+                            if _client:
+                                live_prices = _client.get_current_prices()
+                                if item['stock_name'] in live_prices:
+                                    price = live_prices[item['stock_name']]["price"]
+                                    sell_amount += price * item['quantity']
+                    
+                    if sell_amount > 0:
+                        record_sell(sell_amount)
             else:
                 print("\n⚠️ 장마감 청산 중 오류 발생")
+            
+            # 거래 기록 저장
+            save_trade_history()
             
             # 프로그램 종료 플래그 설정
             should_exit = True
@@ -299,6 +466,10 @@ def run_trading_logic():
                 if result and len(result.get("success", [])) > 0:
                     position = "holding_basket"
                     print("✅ 포지션 변경: none -> holding_basket")
+                    
+                    # 매수 금액 계산 및 기록
+                    buy_amount = calculate_basket_amount(result)
+                    record_buy("basket", buy_amount, result.get("success"))
 
             # --- 매도 조건 1: 바스켓 보유 시 매도 ---
             elif diff <= 0 and position == "holding_basket":
@@ -315,10 +486,15 @@ def run_trading_logic():
                 if result and len(result.get("success", [])) > 0:
                     position = "none"
                     print("✅ 포지션 변경: holding_basket -> none")
+                    
+                    # 매도 금액 계산 및 수익률 기록
+                    sell_amount = calculate_basket_amount(result)
+                    record_sell(sell_amount, result.get("success"))
 
             # --- 매수 조건 2: 바스켓 미보유 시 ETF 매수 ---
             elif diff <= -2 and position == "none":
                 print("  >> ETF 매수 신호 발생 (현재가 - NAV <= -2)")
+                etf_quantity = 1
                 result = buy_etf(
                     access_token=ACCESS_TOKEN,
                     base_url=BASE_URL,
@@ -326,17 +502,22 @@ def run_trading_logic():
                     app_secret=APP_SECRET,
                     account_no=ACCOUNT_NO,
                     stock_code=STOCK_CODE,
-                    quantity=2500,
+                    quantity=etf_quantity,
                     stock_name=STOCK_NAME,
                     tr_id=buy_tr_id
                 )
                 if result and result.get("rt_cd") == "0":
                     position = "holding_etf"
                     print("✅ 포지션 변경: none -> holding_etf")
+                    
+                    # 매수 금액 계산 및 기록
+                    buy_amount = calculate_etf_amount(etf_quantity)
+                    record_buy("etf", buy_amount)
 
             # --- 매도 조건 2: ETF 보유 시 매도 ---
             elif diff >= 0 and position == "holding_etf":
                 print("  >> ETF 매도 신호 발생 (현재가 - NAV >= 0)")
+                etf_quantity = 1
                 result = sell_etf(
                     access_token=ACCESS_TOKEN,
                     base_url=BASE_URL,
@@ -344,13 +525,17 @@ def run_trading_logic():
                     app_secret=APP_SECRET,
                     account_no=ACCOUNT_NO,
                     stock_code=STOCK_CODE,
-                    quantity=2500,
+                    quantity=etf_quantity,
                     stock_name=STOCK_NAME,
                     tr_id=sell_tr_id
                 )
                 if result and result.get("rt_cd") == "0":
                     position = "none"
                     print("✅ 포지션 변경: holding_etf -> none")
+                    
+                    # 매도 금액 계산 및 수익률 기록
+                    sell_amount = calculate_etf_amount(etf_quantity)
+                    record_sell(sell_amount)
 
 
 # ==============================================================================
@@ -395,6 +580,8 @@ if __name__ == "__main__":
             time.sleep(1)
     except KeyboardInterrupt:
         print("\n\n⚠️ 사용자가 프로그램을 중단했습니다.")
+        # 거래 기록 저장
+        save_trade_history()
     finally:
         ws.close()
         print("프로그램이 종료되었습니다.")

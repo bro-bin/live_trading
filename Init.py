@@ -1,1 +1,0 @@
-print('this is for account initialization')
