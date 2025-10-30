@@ -6,7 +6,9 @@ import threading
 import yaml
 import pandas as pd
 from datetime import datetime
-from TradingFunction import buy_etf, sell_etf, buy_basket, sell_basket, all_clear
+from TradingFunction import buy_etf, sell_etf, buy_basket_direct, sell_basket, all_clear
+from GetBasketQty import initialize_websocket, close_websocket, get_optimal_basket
+from GetBasketQty import initialize_websocket, close_websocket, get_optimal_basket
 
 # ==============================================================================
 # ========== 설정 불러오기 (Configuration) ==========
@@ -68,6 +70,44 @@ current_position_info = {
     "buy_time": None,  # 매수 시간
     "buy_details": {}  # 매수 상세 (바스켓의 경우 종목별 정보)
 }
+
+
+# 최적 바스켓 구성 (백그라운드에서 계속 업데이트)
+optimal_basket = {
+    "data": None,  # 최적 바스켓 딕셔너리
+    "last_updated": None,  # 마지막 업데이트 시간
+    "lock": threading.Lock()  # 스레드 안전성을 위한 락
+}
+
+# ==============================================================================
+# ========== 백그라운드 바스켓 계산 함수 ==========
+# ==============================================================================
+def calculate_optimal_basket_background():
+    """백그라운드에서 주기적으로 최적 바스켓을 계산하는 함수"""
+    global optimal_basket, should_exit
+    
+    print("\n🔄 백그라운드 바스켓 계산 스레드 시작")
+    print("⏱️  5초마다 최적 바스켓 구성을 업데이트합니다.")
+    
+    while not should_exit:
+        try:
+            # 최적 바스켓 계산
+            basket_dict = get_optimal_basket(tolerance=1.0)
+            
+            # 스레드 안전하게 업데이트
+            with optimal_basket["lock"]:
+                optimal_basket["data"] = basket_dict
+                optimal_basket["last_updated"] = datetime.now()
+            
+            # 간단한 로그 출력
+            total_qty = sum(basket_dict.values())
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🎯 바스켓 업데이트 완료 ({len(basket_dict)}개 종목, 총 {total_qty}주)")
+            
+        except Exception as e:
+            print(f"⚠️ 바스켓 계산 오류: {e}")
+        
+        # 5초 대기
+        time.sleep(5)
 
 # ==============================================================================
 # ========== 거래 기록 관리 함수 ==========
@@ -274,7 +314,7 @@ def get_initial_balance():
                         break
             
             # 바스켓 종목 보유 확인
-            SAMSUNG_GROUP_CODES = ["028050", "006400", "028260", "207940", "032830", 
+            SAMSUNG_GROUP_CODES = ["028050", "006400", "028260", "032830", 
                                    "018260", "009150", "005930", "010140", "016360", 
                                    "029780", "000810", "012750", "030000", "008770"]
             
@@ -452,24 +492,33 @@ def run_trading_logic():
             # --- 매수 조건 1: ETF 미보유 시 바스켓 매수 ---
             if diff >= 2 and position == "none":
                 print("  >> 바스켓 매수 신호 발생 (현재가 - NAV >= 2)")
-                result = buy_basket(
-                    access_token=ACCESS_TOKEN,
-                    base_url=BASE_URL,
-                    app_key=APP_KEY,
-                    app_secret=APP_SECRET,
-                    account_no=ACCOUNT_NO,
-                    tr_id=buy_tr_id,
-                    tolerance=1.0,
-                    delay=0.5,
-                    auto_close_websocket=False  # 웹소켓 유지
-                )
-                if result and len(result.get("success", [])) > 0:
-                    position = "holding_basket"
-                    print("✅ 포지션 변경: none -> holding_basket")
-                    
-                    # 매수 금액 계산 및 기록
-                    buy_amount = calculate_basket_amount(result)
-                    record_buy("basket", buy_amount, result.get("success"))
+                
+                # 백그라운드에서 계산된 최적 바스켓 가져오기
+                with optimal_basket["lock"]:
+                    basket_dict = optimal_basket["data"]
+                    last_updated = optimal_basket["last_updated"]
+                
+                if basket_dict is None:
+                    print("⚠️ 최적 바스켓이 아직 계산되지 않았습니다. 대기 중...")
+                else:
+                    print(f"✅ 최신 바스켓 사용 (업데이트: {last_updated.strftime('%H:%M:%S')})")
+                    result = buy_basket_direct(
+                        access_token=ACCESS_TOKEN,
+                        base_url=BASE_URL,
+                        app_key=APP_KEY,
+                        app_secret=APP_SECRET,
+                        account_no=ACCOUNT_NO,
+                        basket_dict=basket_dict,
+                        tr_id=buy_tr_id,
+                        delay=0.5
+                    )
+                    if result and len(result.get("success", [])) > 0:
+                        position = "holding_basket"
+                        print("✅ 포지션 변경: none -> holding_basket")
+                        
+                        # 매수 금액 계산 및 기록
+                        buy_amount = calculate_basket_amount(result)
+                        record_buy("basket", buy_amount, result.get("success"))
 
             # --- 매도 조건 1: 바스켓 보유 시 매도 ---
             elif diff <= 0 and position == "holding_basket":
@@ -494,7 +543,7 @@ def run_trading_logic():
             # --- 매수 조건 2: 바스켓 미보유 시 ETF 매수 ---
             elif diff <= -2 and position == "none":
                 print("  >> ETF 매수 신호 발생 (현재가 - NAV <= -2)")
-                etf_quantity = 1
+                etf_quantity = 100
                 result = buy_etf(
                     access_token=ACCESS_TOKEN,
                     base_url=BASE_URL,
@@ -517,7 +566,7 @@ def run_trading_logic():
             # --- 매도 조건 2: ETF 보유 시 매도 ---
             elif diff >= 0 and position == "holding_etf":
                 print("  >> ETF 매도 신호 발생 (현재가 - NAV >= 0)")
-                etf_quantity = 1
+                etf_quantity = 100
                 result = sell_etf(
                     access_token=ACCESS_TOKEN,
                     base_url=BASE_URL,
@@ -553,14 +602,28 @@ if __name__ == "__main__":
     if not get_access_token():
         exit()  # 토큰 발급 실패 시 프로그램 종료
         
-    # 2. 초기 보유 잔고 확인 및 포지션 설정
+    # 2. 바스켓 계산용 웹소켓 연결
+    print("\n📡 바스켓 계산용 웹소켓 연결 중...")
+    try:
+        initialize_websocket(APP_KEY, APP_SECRET, IS_REAL)
+        print("✅ 바스켓 계산용 웹소켓 연결 완료")
+    except Exception as e:
+        print(f"❌ 웹소켓 연결 실패: {e}")
+        exit()
+    
+    # 3. 백그라운드 바스켓 계산 스레드 시작
+    basket_thread = threading.Thread(target=calculate_optimal_basket_background, daemon=True)
+    basket_thread.start()
+    time.sleep(3)  # 초기 바스켓 계산 대기
+    
+    # 4. 초기 보유 잔고 확인 및 포지션 설정
     get_initial_balance()
     
-    # 3. 매매 로직을 별도의 스레드에서 실행
+    # 5. 매매 로직을 별도의 스레드에서 실행
     trading_thread = threading.Thread(target=run_trading_logic, daemon=True)
     trading_thread.start()
     
-    # 4. 메인 스레드에서 웹소켓 실행
+    # 6. 메인 스레드에서 NAV/현재가 웹소켓 실행
     print("\n📡 웹소켓 연결 시작...")
     ws = websocket.WebSocketApp(
         WS_URL,
@@ -574,7 +637,7 @@ if __name__ == "__main__":
     ws_thread = threading.Thread(target=ws.run_forever, daemon=True)
     ws_thread.start()
     
-    # 5. 메인 루프에서 종료 플래그 확인
+    # 7. 메인 루프에서 종료 플래그 확인
     try:
         while not should_exit:
             time.sleep(1)

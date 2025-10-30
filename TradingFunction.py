@@ -141,7 +141,6 @@ def buy_basket(access_token, base_url, app_key, app_secret, account_no, tr_id="V
         "삼성E&A": "028050",
         "삼성SDI": "006400",
         "삼성물산": "028260",
-        "삼성바이오로직스": "207940",
         "삼성생명": "032830",
         "삼성에스디에스": "018260",
         "삼성전기": "009150",
@@ -289,7 +288,6 @@ def sell_basket(access_token, base_url, app_key, app_secret, account_no, tr_id="
         "삼성E&A": "028050",
         "삼성SDI": "006400",
         "삼성물산": "028260",
-        "삼성바이오로직스": "207940",
         "삼성생명": "032830",
         "삼성에스디에스": "018260",
         "삼성전기": "009150",
@@ -630,6 +628,127 @@ def all_clear(access_token, base_url, app_key, app_secret, account_no, tr_id="VT
     
     if len(results["success"]) == results["total_stocks"]:
         print("\n🎉 모든 보유 종목 매도 완료!")
+    
+    print("=" * 80)
+    
+    return results
+# --------------------------------------------------------------
+def buy_basket_direct(access_token, base_url, app_key, app_secret, account_no, basket_dict, tr_id="VTTC0802U", delay=0.5):
+    """
+    이미 계산된 최적 바스켓 구성으로 즉시 매수하는 함수
+    (웹소켓 연결과 계산 과정을 건너뛰고 즉시 매수 실행)
+    
+    Args:
+        access_token (str): 액세스 토큰
+        base_url (str): API 기본 URL
+        app_key (str): APP KEY
+        app_secret (str): APP SECRET
+        account_no (str): 계좌번호 (예: '50154524-01')
+        basket_dict (dict): 이미 계산된 바스켓 구성 {종목명: 수량}
+        tr_id (str): 거래ID (모의투자: 'VTTC0802U', 실전투자: 'TTTC0802U')
+        delay (float): 각 주문 사이의 대기 시간 (초, 기본값 0.5초)
+    
+    Returns:
+        dict: 각 종목별 주문 결과 요약
+    """
+    # 종목명 -> 종목코드 매핑
+    STOCK_CODE_MAP = {
+        "삼성E&A": "028050",
+        "삼성SDI": "006400",
+        "삼성물산": "028260",
+        "삼성생명": "032830",
+        "삼성에스디에스": "018260",
+        "삼성전기": "009150",
+        "삼성전자": "005930",
+        "삼성중공업": "010140",
+        "삼성증권": "016360",
+        "삼성카드": "029780",
+        "삼성화재": "000810",
+        "에스원": "012750",
+        "제일기획": "030000",
+        "호텔신라": "008770"
+    }
+    
+    print("=" * 80)
+    print("⚡ 바스켓 즉시 매수 시작 (사전 계산된 구성 사용)")
+    print("=" * 80)
+    print(f"\n📦 매수할 바스켓 구성 ({len(basket_dict)}개 종목):")
+    for stock_name, quantity in basket_dict.items():
+        print(f"   - {stock_name}: {quantity}주")
+    
+    # 결과 저장
+    results = {
+        "success": [],
+        "failed": [],
+        "total_stocks": len(basket_dict),
+        "total_quantity": sum(basket_dict.values())
+    }
+    
+    # 각 종목별 매수 실행
+    for idx, (stock_name, quantity) in enumerate(basket_dict.items(), 1):
+        print(f"\n[{idx}/{len(basket_dict)}] {stock_name} 매수 진행 중...")
+        
+        # 종목코드 확인
+        stock_code = STOCK_CODE_MAP.get(stock_name)
+        if not stock_code:
+            print(f"❌ {stock_name}의 종목코드를 찾을 수 없습니다.")
+            results["failed"].append({
+                "stock_name": stock_name,
+                "quantity": quantity,
+                "reason": "종목코드 미등록"
+            })
+            continue
+        
+        # 매수 주문 실행
+        result = buy_etf(
+            access_token=access_token,
+            base_url=base_url,
+            app_key=app_key,
+            app_secret=app_secret,
+            account_no=account_no,
+            stock_code=stock_code,
+            quantity=quantity,
+            stock_name=stock_name,
+            tr_id=tr_id
+        )
+        
+        # 결과 저장
+        if result and result.get("rt_cd") == "0":
+            results["success"].append({
+                "stock_name": stock_name,
+                "stock_code": stock_code,
+                "quantity": quantity,
+                "order_no": result.get("output", {}).get("ODNO")
+            })
+        else:
+            results["failed"].append({
+                "stock_name": stock_name,
+                "stock_code": stock_code,
+                "quantity": quantity,
+                "reason": result.get("msg1") if result else "API 호출 실패"
+            })
+        
+        # API 호출 제한을 고려한 대기 (마지막 주문 후에는 대기하지 않음)
+        if idx < len(basket_dict):
+            time.sleep(delay)
+    
+    # 최종 결과 출력
+    print("\n" + "=" * 80)
+    print("📊 바스켓 매수 결과 요약")
+    print("=" * 80)
+    print(f"✅ 성공: {len(results['success'])}건 / ❌ 실패: {len(results['failed'])}건")
+    print(f"📦 총 종목 수: {results['total_stocks']}개")
+    print(f"📈 총 매수 수량: {results['total_quantity']}주")
+    
+    if results["success"]:
+        print("\n✅ 매수 성공 종목:")
+        for item in results["success"]:
+            print(f"   - {item['stock_name']}: {item['quantity']}주 (주문번호: {item['order_no']})")
+    
+    if results["failed"]:
+        print("\n❌ 매수 실패 종목:")
+        for item in results["failed"]:
+            print(f"   - {item['stock_name']}: {item['quantity']}주 (사유: {item['reason']})")
     
     print("=" * 80)
     

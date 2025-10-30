@@ -28,7 +28,7 @@ class KISWebSocketClient:
         # Kodex 삼성그룹 ETF 구성종목
         self.stocks = {
             "삼성E&A": "028050", "삼성SDI": "006400", "삼성물산": "028260",
-            "삼성바이오로직스": "207940", "삼성생명": "032830", "삼성에스디에스": "018260",
+            "삼성생명": "032830", "삼성에스디에스": "018260",
             "삼성전기": "009150", "삼성전자": "005930", "삼성중공업": "010140",
             "삼성증권": "016360", "삼성카드": "029780", "삼성화재": "000810",
             "에스원": "012750", "제일기획": "030000", "호텔신라": "008770"
@@ -140,9 +140,9 @@ def initialize_websocket(app_key: str, app_secret: str, is_real: bool = True):
         print("⏳ 초기 데이터 수신 중...")
         timeout = 10
         start_time = time.time()
-        while len(_client.current_prices) < 15:
+        while len(_client.current_prices) < 14:
             if time.time() - start_time > timeout:
-                print(f"⚠️ 일부 종목만 수신됨 ({len(_client.current_prices)}/15)")
+                print(f"⚠️ 일부 종목만 수신됨 ({len(_client.current_prices)}/14)")
                 break
             time.sleep(0.5)
         
@@ -163,7 +163,6 @@ def calculate_total_market_cap(live_prices: dict):
     """실시간 가격을 바탕으로 각 종목의 시가총액과 비중을 계산하는 함수"""
     ETF_COMPOSITION = {
         "삼성전자": {"quantity": 3845, "code": "005930"}, 
-        "삼성바이오로직스": {"quantity": 119, "code": "207940"},
         "삼성물산": {"quantity": 601, "code": "028260"}, 
         "삼성화재": {"quantity": 202, "code": "000810"},
         "삼성중공업": {"quantity": 4341, "code": "010140"}, 
@@ -271,8 +270,8 @@ def get_optimal_basket(tolerance=1.0):
     # 현재 실시간 가격 조회
     live_prices = _client.get_current_prices()
     
-    if not live_prices or len(live_prices) < 15:
-        raise Exception(f"일부 종목의 실시간 가격을 받지 못했습니다. ({len(live_prices)}/15)")
+    if not live_prices or len(live_prices) < 14:
+        raise Exception(f"일부 종목의 실시간 가격을 받지 못했습니다. ({len(live_prices)}/14)")
     
     # ETF 원본 구성 분석
     target_df, total_cap = calculate_total_market_cap(live_prices)
