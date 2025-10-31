@@ -6,6 +6,7 @@ import threading
 import yaml
 import pandas as pd
 from datetime import datetime
+import os
 from TradingFunction import buy_etf, sell_etf, buy_basket_direct, sell_basket, all_clear
 from GetBasketQty import initialize_websocket, close_websocket, get_optimal_basket
 from GetBasketQty import initialize_websocket, close_websocket, get_optimal_basket
@@ -123,7 +124,8 @@ def save_trade_history():
     
     # 파일명에 날짜 포함
     filename = f"trade_history_{datetime.now().strftime('%Y%m%d')}.csv"
-    df.to_csv(filename, index=False, encoding='utf-8-sig')
+    filepath = os.path.join("trade_history", filename)
+    df.to_csv(filepath, index=False, encoding='utf-8-sig')
     
     print(f"\n✅ 거래 기록이 저장되었습니다: {filename}")
     print(f"📊 총 {len(trade_history)}건의 거래 기록")
@@ -490,7 +492,7 @@ def run_trading_logic():
             print(f"  - 괴리     : {diff:+.2f} 원 (현재가 - NAV)")
 
             # --- 매수 조건 1: ETF 미보유 시 바스켓 매수 ---
-            if diff >= 2 and position == "none":
+            if diff >= 25.26 and position == "none":
                 print("  >> 바스켓 매수 신호 발생 (현재가 - NAV >= 2)")
                 
                 # 백그라운드에서 계산된 최적 바스켓 가져오기
@@ -521,7 +523,7 @@ def run_trading_logic():
                         record_buy("basket", buy_amount, result.get("success"))
 
             # --- 매도 조건 1: 바스켓 보유 시 매도 ---
-            elif diff <= 0 and position == "holding_basket":
+            elif diff <= 8.92 and position == "holding_basket":
                 print("  >> 바스켓 매도 신호 발생 (현재가 - NAV <= 0)")
                 result = sell_basket(
                     access_token=ACCESS_TOKEN,
@@ -541,7 +543,7 @@ def run_trading_logic():
                     record_sell(sell_amount, result.get("success"))
 
             # --- 매수 조건 2: 바스켓 미보유 시 ETF 매수 ---
-            elif diff <= -2 and position == "none":
+            elif diff <= -7.43 and position == "none":
                 print("  >> ETF 매수 신호 발생 (현재가 - NAV <= -2)")
                 etf_quantity = 100
                 result = buy_etf(
@@ -564,7 +566,7 @@ def run_trading_logic():
                     record_buy("etf", buy_amount)
 
             # --- 매도 조건 2: ETF 보유 시 매도 ---
-            elif diff >= 0 and position == "holding_etf":
+            elif diff >= 8.92 and position == "holding_etf":
                 print("  >> ETF 매도 신호 발생 (현재가 - NAV >= 0)")
                 etf_quantity = 100
                 result = sell_etf(
