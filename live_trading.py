@@ -1,0 +1,1087 @@
+import websocket
+import requests
+import json
+import time
+import threading
+import yaml
+import pandas as pd
+from datetime import datetime, timedelta
+import os
+# _________________________ PART 1: 클래스 및 함수 정의  __________________________
+
+# ==============================================================================
+# ========== Class 1: 기본 설정 및 토큰 관리 ==========
+# ==============================================================================
+class KISConfig:
+    """한국투자증권 API 설정 및 토큰 관리 클래스"""
+    
+    def __init__(self, config_path='config.yaml'):
+        """config.yaml 불러오기"""
+        print("\n📋 설정 파일 로드 중...")
+        
+        with open(config_path, encoding='UTF-8') as f:
+            cfg = yaml.safe_load(f)
+        
+        # API 인증 정보
+        self.app_key = cfg['APP_KEY']
+        self.app_secret = cfg['APP_SECRET']
+        self.account_no = cfg['ACCOUNT_NO']
+        self.base_url = cfg['URL_BASE']
+        
+        # 계좌 정보 분리
+        self.cano = cfg['CANO']
+        self.acnt_prdt_cd = cfg['ACNT_PRDT_CD']
+        
+        # 실전/모의 판단
+        self.is_real = "vts" not in self.base_url.lower()
+        
+        # 웹소켓 URL
+        self.ws_url = "ws://ops.koreainvestment.com:21000" if self.is_real else "ws://ops.koreainvestment.com:31000"
+        
+        # 접근 토큰
+        self.access_token = None
+        
+        print(f"✅ 설정 로드 완료")
+        print(f"   - 환경: {'실전투자' if self.is_real else '모의투자'}")
+        print(f"   - 계좌: {self.account_no}")
+        print(f"   - URL: {self.base_url}")
+    
+    def issue_token(self):
+        """REST API용 접근 토큰 발급 (유효기간 24시간)"""
+        try:
+            print("\n🔑 접근 토큰 발급 중...")
+            
+            url = f"{self.base_url}/oauth2/tokenP"
+            headers = {"content-type": "application/json"}
+            data = {
+                "grant_type": "client_credentials",
+                "appkey": self.app_key,
+                "appsecret": self.app_secret
+            }
+            
+            response = requests.post(url, headers=headers, data=json.dumps(data))
+            
+            if response.status_code == 200:
+                result = response.json()
+                self.access_token = result['access_token']
+                expires_in = result.get('expires_in', 'N/A')
+                
+                print(f"✅ 접근 토큰 발급 성공")
+                if expires_in != 'N/A':
+                    print(f"   만료시간: {expires_in}초 ({int(expires_in)/3600:.1f}시간)")
+                return True
+            else:
+                print(f"❌ 접근 토큰 발급 실패: {response.status_code}")
+                print(f"   응답: {response.text}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ 접근 토큰 발급 중 오류: {e}")
+            return False
+    
+    def revoke_token(self):
+        """접근 토큰 반납"""
+        try:
+            print("\n🔓 접근 토큰 반납 중...")
+            
+            if not self.access_token:
+                print("⚠️  반납할 토큰이 없습니다.")
+                return True
+            
+            url = f"{self.base_url}/oauth2/revokeP"
+            headers = {"content-type": "application/json"}
+            body = {
+                "appkey": self.app_key,
+                "appsecret": self.app_secret,
+                "token": self.access_token
+            }
+            
+            response = requests.post(url, headers=headers, data=json.dumps(body))
+            
+            if response.status_code == 200:
+                print("✅ 접근 토큰 반납 완료")
+                self.access_token = None
+                return True
+            else:
+                print(f"⚠️  토큰 반납 실패: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ 토큰 반납 중 오류: {e}")
+            return False
+
+
+# ==============================================================================
+# ========== Class 2: 바스켓 계산용 웹소켓 ==========
+# ==============================================================================
+class BasketWebSocket:
+    """바스켓 구성을 위한 개별 종목 실시간 가격 수신 웹소켓"""
+    
+    def __init__(self, config: KISConfig):
+        """초기화"""
+        self.config = config
+        self.ws = None
+        self.ws_approval_key = None
+        self.is_connected = False
+        
+        # 실시간 가격 저장
+        self.current_prices = {}  # {종목명: 가격}
+        self.price_lock = threading.Lock()
+        
+        # 구독할 삼성그룹 종목
+        self.stock_list = {
+            "삼성E&A": "028050",
+            "삼성SDI": "006400",
+            "삼성물산": "028260",
+            "삼성생명": "032830",
+            "삼성에스디에스": "018260",
+            "삼성전기": "009150",
+            "삼성전자": "005930",
+            "삼성중공업": "010140",
+            "삼성증권": "016360",
+            "삼성카드": "029780",
+            "삼성화재": "000810",
+            "에스원": "012750",
+            "제일기획": "030000",
+            "호텔신라": "008770"
+        }
+        
+        print(f"\n📦 바스켓 웹소켓 초기화 ({len(self.stock_list)}개 종목)")
+    
+    def _issue_websocket_key(self):
+        """웹소켓 접속키 발급"""
+        try:
+            print("🔑 바스켓 웹소켓 접속키 발급 중...")
+            
+            url = f"{self.config.base_url}/oauth2/Approval"
+            headers = {"content-type": "application/json"}
+            body = {
+                "grant_type": "client_credentials",
+                "appkey": self.config.app_key,
+                "secretkey": self.config.app_secret
+            }
+            
+            response = requests.post(url, headers=headers, data=json.dumps(body))
+            
+            if response.status_code == 200:
+                result = response.json()
+                self.ws_approval_key = result.get('approval_key')
+                if self.ws_approval_key:
+                    print(f"✅ 바스켓 웹소켓 접속키 발급 성공")
+                    return True
+                else:
+                    print("❌ 응답에 approval_key가 없습니다.")
+                    return False
+            else:
+                print(f"❌ 웹소켓 접속키 발급 실패: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ 웹소켓 접속키 발급 중 오류: {e}")
+            return False
+    
+    def connect(self):
+        """웹소켓 연결"""
+        try:
+            print("\n🌐 바스켓 웹소켓 연결 시작...")
+            
+            # 1. 접속키 발급
+            if not self._issue_websocket_key():
+                return False
+            
+            # 2. 웹소켓 연결
+            self.ws = websocket.WebSocketApp(
+                self.config.ws_url,
+                on_message=self._on_message,
+                on_error=self._on_error,
+                on_close=self._on_close,
+                on_open=self._on_open
+            )
+            
+            # 별도 스레드에서 실행
+            ws_thread = threading.Thread(
+                target=self.ws.run_forever,
+                kwargs={'ping_interval': 20, 'ping_timeout': 5}
+            )
+            ws_thread.daemon = True
+            ws_thread.start()
+            
+            # 연결 대기
+            for i in range(10):
+                if self.is_connected:
+                    print("✅ 바스켓 웹소켓 연결 성공!")
+                    return True
+                time.sleep(0.5)
+            
+            print("⚠️  바스켓 웹소켓 연결 타임아웃")
+            return False
+            
+        except Exception as e:
+            print(f"❌ 바스켓 웹소켓 연결 실패: {e}")
+            return False
+    
+    def subscribe(self):
+        """개별 종목 현재가 구독"""
+        if not self.is_connected or not self.ws:
+            print("❌ 웹소켓이 연결되지 않았습니다.")
+            return False
+        
+        print("\n📡 종목 구독 시작...")
+        
+        try:
+            for stock_name, stock_code in self.stock_list.items():
+                subscribe_data = {
+                    "header": {
+                        "approval_key": self.ws_approval_key,
+                        "custtype": "P",
+                        "tr_type": "1",
+                        "content-type": "utf-8"
+                    },
+                    "body": {
+                        "input": {
+                            "tr_id": "H0STCNT0",  # 주식 체결가
+                            "tr_key": stock_code
+                        }
+                    }
+                }
+                
+                self.ws.send(json.dumps(subscribe_data))
+                print(f"  ✓ {stock_name} ({stock_code})")
+                time.sleep(0.1)
+            
+            print(f"✅ 총 {len(self.stock_list)}개 종목 구독 완료!")
+            return True
+            
+        except Exception as e:
+            print(f"❌ 구독 중 오류: {e}")
+            return False
+    
+    def _on_open(self, ws):
+        """연결 성공"""
+        print("✅ 바스켓 웹소켓 연결 완료")
+        self.is_connected = True
+    
+
+    def _on_message(self, ws, message):
+        """메시지 수신"""
+        try:
+            # PINGPONG 처리
+            if message == "PINGPONG":
+                ws.pong(message)
+                return
+            
+            # 실시간 데이터 처리
+            if message.startswith('0|') or message.startswith('1|'):
+                parts = message.split('|')
+                if len(parts) < 4:
+                    return
+                
+                tr_id = parts[1]
+                data_body = parts[3]
+                
+                if tr_id == "H0STCNT0":  # 체결가
+                    data_parts = data_body.split('^')
+                    if len(data_parts) >= 3:
+                        stock_code = data_parts[0]
+                        current_price = int(data_parts[2])
+                        
+                        # 종목명 찾기
+                        stock_name = None
+                        for name, code in self.stock_list.items():
+                            if code == stock_code:
+                                stock_name = name
+                                break
+                        
+                        if stock_name:
+                            with self.price_lock:
+                                # ✅ 수정: 가격과 종목코드를 함께 저장
+                                self.current_prices[stock_name] = {
+                                    "price": current_price,
+                                    "code": stock_code
+                                }
+                            
+                            timestamp = datetime.now().strftime("%H:%M:%S")
+                            print(f"[{timestamp}] 📈 {stock_name}: {current_price:,}원")
+            
+            # JSON 응답 (구독 확인)
+            elif message.startswith('{'):
+                msg_json = json.loads(message)
+                if msg_json.get('body', {}).get('rt_cd') == '0':
+                    print(f"  ✓ 구독 성공")
+        
+        except Exception as e:
+            print(f"⚠️  메시지 처리 오류: {e}")
+    
+    def _on_error(self, ws, error):
+        """에러"""
+        print(f"❌ 바스켓 웹소켓 에러: {error}")
+    
+    def _on_close(self, ws, close_status_code, close_msg):
+        """연결 종료"""
+        print(f"🔌 바스켓 웹소켓 연결 종료")
+        self.is_connected = False
+    
+    def get_current_prices(self):
+        """현재 가격 조회"""
+        with self.price_lock:
+            return dict(self.current_prices)
+    
+    def close(self):
+        """연결 종료"""
+        if self.ws:
+            self.ws.close()
+
+
+# ==============================================================================
+# ========== Class 3: 모니터링 웹소켓 (ETF diff 계산용) ==========
+# ==============================================================================
+class MonitoringWebSocket:
+    """ETF 괴리(diff) 계산을 위한 현재가/NAV 수신 웹소켓"""
+    
+    def __init__(self, config: KISConfig):
+        """초기화"""
+        self.config = config
+        self.ws = None
+        self.ws_approval_key = None
+        self.is_connected = False
+        
+        # ETF 정보
+        self.etf_code = "102780"  # KODEX 삼성그룹
+        self.etf_name = "KODEX 삼성그룹"
+        
+        # 실시간 데이터 저장
+        self.etf_data = {
+            "nav": None,
+            "current_price": None,
+            "diff": None,
+            "diff_rate": None,
+            "nav_time": None,
+            "price_time": None
+        }
+        self.data_lock = threading.Lock()
+        
+        print(f"\n🔍 모니터링 웹소켓 초기화")
+        print(f"   - 종목: {self.etf_name} ({self.etf_code})")
+    
+    def _issue_websocket_key(self):
+        """웹소켓 접속키 발급"""
+        try:
+            print("🔑 모니터링 웹소켓 접속키 발급 중...")
+            
+            url = f"{self.config.base_url}/oauth2/Approval"
+            headers = {"content-type": "application/json"}
+            body = {
+                "grant_type": "client_credentials",
+                "appkey": self.config.app_key,
+                "secretkey": self.config.app_secret
+            }
+            
+            response = requests.post(url, headers=headers, data=json.dumps(body))
+            
+            if response.status_code == 200:
+                result = response.json()
+                self.ws_approval_key = result['approval_key']
+                print(f"✅ 모니터링 웹소켓 접속키 발급 성공")
+                return True
+            else:
+                print(f"❌ 웹소켓 접속키 발급 실패: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ 웹소켓 접속키 발급 중 오류: {e}")
+            return False
+    
+    def connect(self):
+        """웹소켓 연결"""
+        try:
+            print("\n🌐 모니터링 웹소켓 연결 시작...")
+            
+            # 1. 접속키 발급
+            if not self._issue_websocket_key():
+                return False
+            
+            # 2. 웹소켓 연결
+            self.ws = websocket.WebSocketApp(
+                self.config.ws_url,
+                on_message=self._on_message,
+                on_error=self._on_error,
+                on_close=self._on_close,
+                on_open=self._on_open
+            )
+            
+            # 별도 스레드에서 실행
+            ws_thread = threading.Thread(
+                target=self.ws.run_forever,
+                kwargs={'ping_interval': 20, 'ping_timeout': 5}
+            )
+            ws_thread.daemon = True
+            ws_thread.start()
+            
+            # 연결 대기
+            for i in range(10):
+                if self.is_connected:
+                    print("✅ 모니터링 웹소켓 연결 성공!")
+                    return True
+                time.sleep(0.5)
+            
+            print("⚠️  모니터링 웹소켓 연결 타임아웃")
+            return False
+            
+        except Exception as e:
+            print(f"❌ 모니터링 웹소켓 연결 실패: {e}")
+            return False
+    
+    def subscribe(self):
+        """ETF 현재가 및 NAV 구독"""
+        if not self.is_connected or not self.ws:
+            print("❌ 웹소켓이 연결되지 않았습니다.")
+            return False
+        
+        print("\n📡 ETF 데이터 구독 시작...")
+        
+        try:
+            # 1. NAV 구독
+            nav_subscribe = {
+                "header": {
+                    "approval_key": self.ws_approval_key,
+                    "custtype": "P",
+                    "tr_type": "1",
+                    "content-type": "utf-8"
+                },
+                "body": {
+                    "input": {
+                        "tr_id": "H0STNAV0",
+                        "tr_key": self.etf_code
+                    }
+                }
+            }
+            self.ws.send(json.dumps(nav_subscribe))
+            print(f"  ✓ NAV 구독 ({self.etf_code})")
+            time.sleep(0.5)
+            
+            # 2. 현재가 구독
+            price_subscribe = {
+                "header": {
+                    "approval_key": self.ws_approval_key,
+                    "custtype": "P",
+                    "tr_type": "1",
+                    "content-type": "utf-8"
+                },
+                "body": {
+                    "input": {
+                        "tr_id": "H0STCNT0",
+                        "tr_key": self.etf_code
+                    }
+                }
+            }
+            self.ws.send(json.dumps(price_subscribe))
+            print(f"  ✓ 현재가 구독 ({self.etf_code})")
+            
+            print("✅ ETF 구독 완료!")
+            return True
+            
+        except Exception as e:
+            print(f"❌ 구독 중 오류: {e}")
+            return False
+    
+    def _on_open(self, ws):
+        """연결 성공"""
+        print("✅ 모니터링 웹소켓 연결 완료")
+        self.is_connected = True
+    
+    def _on_message(self, ws, message):
+        """메시지 수신"""
+        try:
+            # PINGPONG 처리
+            if message == "PINGPONG":
+                ws.pong(message)
+                return
+            
+            # 실시간 데이터 처리
+            if message.startswith('0|') or message.startswith('1|'):
+                parts = message.split('|')
+                if len(parts) < 4:
+                    return
+                
+                tr_id = parts[1]
+                data_str = parts[3]
+                
+                # NAV 데이터
+                if tr_id == "H0STNAV0":
+                    fields = data_str.split('^')
+                    if len(fields) > 1:
+                        nav_value = float(fields[1])
+                        
+                        with self.data_lock:
+                            self.etf_data["nav"] = nav_value
+                            self.etf_data["nav_time"] = datetime.now().strftime("%H:%M:%S")
+                            
+                            # diff 계산
+                            if self.etf_data["current_price"] is not None:
+                                self._calculate_diff()
+                
+                # 현재가 데이터
+                elif tr_id == "H0STCNT0":
+                    fields = data_str.split('^')
+                    if len(fields) > 2:
+                        current_price = int(fields[2])
+                        
+                        with self.data_lock:
+                            self.etf_data["current_price"] = current_price
+                            self.etf_data["price_time"] = datetime.now().strftime("%H:%M:%S")
+                            
+                            # diff 계산
+                            if self.etf_data["nav"] is not None:
+                                self._calculate_diff()
+            
+            # JSON 응답 (구독 확인)
+            elif message.startswith('{'):
+                msg_json = json.loads(message)
+                if msg_json.get('body', {}).get('rt_cd') == '0':
+                    print(f"  ✓ 구독 성공")
+        
+        except Exception as e:
+            print(f"⚠️  메시지 처리 오류: {e}")
+    
+    def _calculate_diff(self):
+        """
+        괴리 계산 (현재가 - NAV)
+        ⚠️ data_lock 내부에서 호출
+        """
+        nav = self.etf_data["nav"]
+        price = self.etf_data["current_price"]
+        
+        if nav is not None and price is not None and nav != 0:
+            self.etf_data["diff"] = price - nav
+            self.etf_data["diff_rate"] = (self.etf_data["diff"] / nav) * 100
+    
+    def _on_error(self, ws, error):
+        """에러"""
+        print(f"❌ 모니터링 웹소켓 에러: {error}")
+    
+    def _on_close(self, ws, close_status_code, close_msg):
+        """연결 종료"""
+        print(f"🔌 모니터링 웹소켓 연결 종료")
+        self.is_connected = False
+    
+    def get_diff_info(self):
+        """현재 괴리 정보 조회"""
+        with self.data_lock:
+            return dict(self.etf_data)
+    
+    def close(self):
+        """연결 종료"""
+        if self.ws:
+            self.ws.close()
+
+# =============================== end =======================================
+# ===========================================================================
+
+from trading_function import buy_etf, sell_etf, buy_basket_direct, sell_basket, clear_all_stocks, save_df_to_csv
+# __________________________  PART 2: 전략구현  _______________________________
+### 현재 포지션 확인 함수
+def get_current_position(config: KISConfig) -> str:
+    """
+    현재 잔고를 조회하여 포지션 상태를 반환
+    
+    Args:
+        config: KISConfig 객체
+    
+    Returns:
+        str: 포지션 상태
+            - "none": 포지션 없음
+            - "holding_basket": 바스켓 보유 중 (삼성그룹 개별 종목들)
+            - "holding_etf": ETF 보유 중 (KODEX 삼성그룹)
+    """
+    try:
+        print("\n🔍 현재 포지션 확인 중...")
+        
+        # 잔고 조회 파라미터
+        params = {
+            "CANO": config.cano,
+            "ACNT_PRDT_CD": config.acnt_prdt_cd,
+            "AFHR_FLPR_YN": "N",
+            "OFL_YN": "",
+            "INQR_DVSN": "02",  # 종목별 조회
+            "UNPR_DVSN": "01",
+            "FUND_STTL_ICLD_YN": "N",
+            "FNCG_AMT_AUTO_RDPT_YN": "N",
+            "PRCS_DVSN": "00",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": ""
+        }
+        
+        # REST API 호출
+        url = f"{config.base_url}/uapi/domestic-stock/v1/trading/inquire-balance"
+        headers = {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {config.access_token}",
+            "appkey": config.app_key,
+            "appsecret": config.app_secret,
+            "tr_id": "VTTC8434R" if not config.is_real else "TTTC8434R"
+        }
+        
+        response = requests.get(url, headers=headers, params=params)
+        
+        if response.status_code != 200:
+            print(f"❌ 잔고 조회 실패: {response.status_code}")
+            print(f"   응답: {response.text}")
+            return "none"
+        
+        result = response.json()
+        
+        if result.get('rt_cd') != '0':
+            print(f"❌ 잔고 조회 오류: {result.get('msg1', 'Unknown error')}")
+            return "none"
+        
+        # 보유 종목 리스트
+        holdings = result.get('output1', [])
+        
+        if not holdings or len(holdings) == 0:
+            print("✅ 포지션 없음 (잔고 비어있음)")
+            return "none"
+        
+        # 삼성그룹 종목 코드 리스트
+        samsung_codes = [
+            "028050", "006400", "028260", "032830", "018260",
+            "009150", "005930", "010140", "016360", "029780",
+            "000810", "012750", "030000", "008770"
+        ]
+        
+        # ETF 코드
+        etf_code = "102780"
+        
+        # 보유 종목 확인
+        has_etf = False
+        has_basket = False
+        
+        for item in holdings:
+            stock_code = item.get('pdno', '')
+            quantity = int(item.get('hldg_qty', 0))
+            
+            if quantity > 0:
+                if stock_code == etf_code:
+                    has_etf = True
+                    print(f"  📊 ETF 보유: {stock_code} ({quantity}주)")
+                elif stock_code in samsung_codes:
+                    has_basket = True
+                    stock_name = item.get('prdt_name', stock_code)
+                    print(f"  📦 바스켓 종목: {stock_name} ({quantity}주)")
+        
+        # 포지션 판단
+        if has_etf:
+            print("✅ 현재 포지션: ETF 보유 중")
+            return "holding_etf"
+        elif has_basket:
+            print("✅ 현재 포지션: 바스켓 보유 중")
+            return "holding_basket"
+        else:
+            print("✅ 현재 포지션: 없음")
+            return "none"
+        
+    except Exception as e:
+        print(f"❌ 포지션 확인 중 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return "none"
+
+
+#전역 변수 추가 (for. run_trading_logic함수)
+basket_optimization_counter = 0
+cached_basket_quantities = None
+
+### 조건에 따른 매매 실행 함수
+def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket, monitoring_ws: MonitoringWebSocket):
+    """
+    매매 로직 실행 (1초마다 호출)
+    
+    [동작]
+    - 매 1초: diff 모니터링 + 로그 출력 + 매매 조건 체크 + 조건 충족 시 즉시 실행
+    - 5초마다: 바스켓 수량 최적화 계산
+    
+    매매 조건:
+        1. diff >= -5 and position == "none" → 바스켓 매수
+        2. diff <= -8 and position == "holding_basket" → 바스켓 매도
+        3. diff <= -11 and position == "none" → ETF 매수
+        4. diff >= -8 and position == "holding_etf" → ETF 매도
+    
+    Args:
+        config: KISConfig 객체
+        basket_ws: 바스켓 웹소켓
+        monitoring_ws: 모니터링 웹소켓
+    """
+    
+    global basket_optimization_counter, cached_basket_quantities
+    
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    
+    try:
+        # ====================================================================
+        # STEP 1: diff 모니터링 및 로그 출력 (매 1초)
+        # ====================================================================
+        diff_info = monitoring_ws.get_diff_info()
+        nav = diff_info.get("nav")
+        current_price = diff_info.get("current_price")
+        diff = diff_info.get("diff")
+        diff_rate = diff_info.get("diff_rate")
+        
+        if nav is not None and current_price is not None and diff is not None:
+            print(f"[{timestamp}] 📊 NAV: {nav:>8,.0f}원 | "
+                  f"💰 현재가: {current_price:>8,}원 | "
+                  f"📉 diff: {diff:>6,.0f}원 ({diff_rate:>+6.2f}%)")
+        else:
+            print(f"[{timestamp}] ⏳ 데이터 수신 대기 중... "
+                  f"(NAV: {nav}, 현재가: {current_price})")
+            return  # 데이터 없으면 조기 종료
+        
+        # ====================================================================
+        # STEP 2: 바스켓 수량 최적화 (5초마다)
+        # ====================================================================
+        basket_optimization_counter += 1
+        
+        if basket_optimization_counter >= 5:
+            live_basket_prices = basket_ws.get_current_prices()
+            
+            if len(live_basket_prices) >= len(basket_ws.stock_list):
+                try:
+                    from utils import get_basket_qty
+                    cached_basket_quantities = get_basket_qty(live_basket_prices)
+                    print(f"[{timestamp}] 🔄 바스켓 최적화 완료 ({len(cached_basket_quantities)}개 종목)")
+                except Exception as e:
+                    print(f"[{timestamp}] ⚠️  바스켓 최적화 오류: {e}")
+            else:
+                print(f"[{timestamp}] ⚠️  바스켓 가격 데이터 부족 "
+                      f"({len(live_basket_prices)}/{len(basket_ws.stock_list)})")
+            
+            basket_optimization_counter = 0  # 카운터 초기화
+        
+        # ====================================================================
+        # STEP 3: 현재 포지션 확인
+        # ====================================================================
+        position = get_current_position(config)
+        
+        # ====================================================================
+        # STEP 4: tr_id 설정
+        # ====================================================================
+        if config.is_real:
+            buy_tr_id = "TTTC0802U"
+            sell_tr_id = "TTTC0801U"
+        else:
+            buy_tr_id = "VTTC0802U"
+            sell_tr_id = "VTTC0801U"
+        
+        # ====================================================================
+        # STEP 5: 매매 조건 체크 및 즉시 실행
+        # ====================================================================
+        
+        # 조건 1: diff >= -5 and position == "none" → 바스켓 매수
+        if diff >= -5 and position == "none":
+            if cached_basket_quantities is not None:
+                print(f"\n{'='*80}")
+                print(f"⚡ [{timestamp}] [조건 1 충족] diff >= -5 & 포지션 없음 → 바스켓 매수")
+                print(f"{'='*80}")
+                
+                # 최신 가격 정보 가져오기
+                live_basket_prices = basket_ws.get_current_prices()
+                
+                buy_basket_direct(
+                    access_token=config.access_token,
+                    base_url=config.base_url,
+                    app_key=config.app_key,
+                    app_secret=config.app_secret,
+                    account_no=config.account_no,
+                    tr_id=buy_tr_id,
+                    live_prices=live_basket_prices
+                )
+                print(f"{'='*80}\n")
+            else:
+                print(f"[{timestamp}] ⚠️  조건 충족하나 바스켓 최적화 대기 중...")
+        
+        # 조건 2: diff <= -8 and position == "holding_basket" → 바스켓 매도
+        elif diff <= -8 and position == "holding_basket":
+            print(f"\n{'='*80}")
+            print(f"⚡ [{timestamp}] [조건 2 충족] diff <= -8 & 바스켓 보유 중 → 바스켓 매도")
+            print(f"{'='*80}")
+            
+            sell_basket(
+                access_token=config.access_token,
+                base_url=config.base_url,
+                app_key=config.app_key,
+                app_secret=config.app_secret,
+                account_no=config.account_no,
+                tr_id=sell_tr_id
+            )
+            print(f"{'='*80}\n")
+        
+        # 조건 3: diff <= -11 and position == "none" → ETF 매수
+        elif diff <= -11 and position == "none":
+            print(f"\n{'='*80}")
+            print(f"⚡ [{timestamp}] [조건 3 충족] diff <= -11 & 포지션 없음 → ETF 매수")
+            print(f"{'='*80}")
+            
+            buy_etf(
+                access_token=config.access_token,
+                base_url=config.base_url,
+                app_key=config.app_key,
+                app_secret=config.app_secret,
+                account_no=config.account_no,
+                tr_id=buy_tr_id
+            )
+            print(f"{'='*80}\n")
+        
+        # 조건 4: diff >= -8 and position == "holding_etf" → ETF 매도
+        elif diff >= -8 and position == "holding_etf":
+            print(f"\n{'='*80}")
+            print(f"⚡ [{timestamp}] [조건 4 충족] diff >= -8 & ETF 보유 중 → ETF 매도")
+            print(f"{'='*80}")
+            
+            sell_etf(
+                access_token=config.access_token,
+                base_url=config.base_url,
+                app_key=config.app_key,
+                app_secret=config.app_secret,
+                account_no=config.account_no,
+                tr_id=sell_tr_id
+            )
+            print(f"{'='*80}\n")
+        
+    except Exception as e:
+        print(f"❌ [{timestamp}] 매매 로직 실행 중 오류: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+# =============================== end =======================================
+# ===========================================================================
+
+# _________________________ PART 3: 메인 프로그램 __________________________
+if __name__ == "__main__":
+    
+    # --- main 블록에서 사용할 추가 모듈 임포트 ---
+    import threading
+    from datetime import time as dt_time, datetime, timedelta
+    import time
+    import traceback
+    
+    # --- (중요) trading_function에서 save_df_to_csv 임포트 ---
+    try:
+        from trading_function import save_df_to_csv
+    except ImportError:
+        print("="*80)
+        print("⚠️  [임포트 오류] trading_function.py에 save_df_to_csv 함수가 없거나")
+        print("   live_trading.py PART 2의 from trading_function... 라인에")
+        print("   save_df_to_csv가 누락되었습니다. 임포트 목록을 확인해주세요.")
+        print("   (예: from trading_function import ..., clear_all_stocks, save_df_to_csv)")
+        print("="*80)
+        exit()
+
+    
+    # ===================================================================
+    # 전역 변수 초기화
+    # ===================================================================
+    
+    # --- 전역 객체 변수 ---
+    main_config_obj = None
+    main_basket_ws_obj = None
+    main_monitoring_ws_obj = None
+    
+    # ✅ 추가: 바스켓 최적화용 전역 변수
+    basket_optimization_counter = 0
+    cached_basket_quantities = None
+
+    try:
+        # ==================================================================
+        #  1. 설정 및 웹소켓 초기화
+        # ==================================================================
+        print("🚀 자동매매 프로그램을 시작합니다.")
+        main_config_obj = KISConfig(config_path='config.yaml')
+        
+        main_basket_ws_obj = BasketWebSocket(main_config_obj)
+        main_monitoring_ws_obj = MonitoringWebSocket(main_config_obj)
+        
+        # 1-1. (순서 1) 웹소켓 연결
+        print("\n" + "-"*30 + " 1. 웹소켓 연결 " + "-"*30)
+        if not main_basket_ws_obj.connect():
+            raise Exception("바스켓 웹소켓(BasketWebSocket) 연결에 실패했습니다.")
+        
+        if not main_monitoring_ws_obj.connect():
+            raise Exception("모니터링 웹소켓(MonitoringWebSocket) 연결에 실패했습니다.")
+        
+        print("\n✅ 모든 웹소켓이 성공적으로 연결되었습니다. 장 시작을 대기합니다.")
+
+        # ==================================================================
+        #  거래일 루프 (프로그램이 종료되지 않고 매일 반복)
+        # ==================================================================
+        while True:
+            # ======================================================
+            # 2. 장 시작 대기 (09:00:00)
+            # ======================================================
+            print("\n" + "-"*30 + " 2. 장 시작 대기 " + "-"*30)
+            start_time = dt_time(9, 0, 0)
+            end_time = dt_time(15, 15, 0)  # 매매 종료 시간
+            
+            # ✅ 수정: 1초마다 확인
+            while datetime.now().time() < start_time:
+                now_str = datetime.now().strftime('%H:%M:%S')
+                print(f"   ... 장 시작 대기 중 (현재: {now_str}, 목표: 09:00:00)", end="\r")
+                time.sleep(1)  # 1초마다 확인
+            
+            print(f"\n☀️  장 시작! (09:00:00) - {datetime.now().strftime('%Y-%m-%d')}")
+
+            # ======================================================
+            # 2-1. (순서 2) 9시 작업 병렬 실행 (토큰 발급, 구독)
+            # ======================================================
+            print("\n" + "-"*30 + " 2-1. 토큰 발급 및 구독 (병렬) " + "-"*30)
+            
+            # 병렬 실행할 작업 정의
+            token_thread = threading.Thread(target=main_config_obj.issue_token, name="TokenIssuer")
+            basket_sub_thread = threading.Thread(target=main_basket_ws_obj.subscribe, name="BasketSubscriber")
+            mon_sub_thread = threading.Thread(target=main_monitoring_ws_obj.subscribe, name="MonitorSubscriber")
+            
+            # 작업 시작
+            token_thread.start()
+            basket_sub_thread.start()
+            mon_sub_thread.start()
+            
+            # 모든 작업이 완료될 때까지 대기 (순서 2 -> 3 보장)
+            token_thread.join()
+            basket_sub_thread.join()
+            mon_sub_thread.join()
+            
+            # 토큰 발급 실패 시, 매매 로직을 실행할 수 없으므로 다음 거래일까지 대기
+            if not main_config_obj.access_token:
+                print("\n❌ 토큰 발급에 실패했습니다. 오늘은 매매를 실행할 수 없습니다.")
+                print("   (순서 8) 다음 거래일까지 대기를 시작합니다.")
+                # (순서 8)로 바로 넘어감
+            else:
+                print("\n✅ 토큰 발급 및 웹소켓 구독이 완료되었습니다.")
+
+                # ======================================================
+                # 3. & 4. (순서 3, 4) 매매 로직 실행
+                # ======================================================
+                print("\n" + "-"*30 + " 3. 매매 로직 실행 " + "-"*30)
+                print("   📊 diff 모니터링: 1초마다")
+                print("   🔄 바스켓 최적화: 5초마다")
+                print("   ⚡ 매매 실행: 조건 충족 시 즉시")
+                print("-"*80 + "\n")
+
+                # ✅ 전역 변수 초기화 (매일 장 시작 시)
+                basket_optimization_counter = 0
+                cached_basket_quantities = None
+
+                # ✅ 메인 루프: 1초마다 run_trading_logic 호출
+                while datetime.now().time() <= end_time:
+                    loop_start_time = time.monotonic()
+                    
+                    # (순서 3) 매매 로직 함수 호출 (1초마다)
+                    run_trading_logic(
+                        main_config_obj, 
+                        main_basket_ws_obj, 
+                        main_monitoring_ws_obj
+                    )
+                    
+                    # 1초 간격 유지
+                    elapsed = time.monotonic() - loop_start_time
+                    wait_time = max(0, 1.0 - elapsed)
+                    
+                    # (순서 4) 종료 시간 체크
+                    if datetime.now().time() > end_time:
+                        break
+                    
+                    time.sleep(wait_time)
+
+                # ======================================================
+                # 4. 장 마감
+                # ======================================================
+                print(f"\n🌙 장 마감 (15:15:00). 매매 로직을 종료합니다.")
+                
+                # ======================================================
+                # 5. (순서 5) 전량 매도
+                # ======================================================
+                print("\n" + "-"*30 + " 5. 전량 매도 " + "-"*30)
+                
+                # 전량 매도용 tr_id 설정 (trading_function.py 참조)
+                sell_tr_id = "TTTC0801U" if main_config_obj.is_real else "VTTC0801U"
+                
+                clear_all_stocks(
+                    access_token=main_config_obj.access_token,
+                    base_url=main_config_obj.base_url,
+                    app_key=main_config_obj.app_key,
+                    app_secret=main_config_obj.app_secret,
+                    account_no=main_config_obj.account_no,
+                    tr_id=sell_tr_id
+                )
+
+                # ======================================================
+                # 6. (순서 6) CSV 저장
+                # ======================================================
+                print("\n" + "-"*30 + " 6. CSV 저장 " + "-"*30)
+                save_df_to_csv(filename=f"trade_history_{datetime.now().strftime('%Y%m%d')}.csv")
+
+                # ======================================================
+                # 7. (순서 7) 토큰 반납
+                # ======================================================
+                print("\n" + "-"*30 + " 7. 토큰 반납 " + "-"*30)
+                main_config_obj.revoke_token()
+            
+            # ======================================================
+            # (순서 8) 다음 장 대기
+            # ======================================================
+            print("\n" + "-"*30 + " 8. 다음 거래일 대기 " + "-"*30)
+            print(f"   웹소켓 연결은 유지합니다.")
+            
+            # 다음 날 9시 계산 (주말/공휴일 미고려, 단순 24시간 후 기준)
+            now = datetime.now()
+            # 다음 날 9시 0분 0초
+            next_market_open = (now + timedelta(days=1)).replace(
+                hour=start_time.hour, 
+                minute=start_time.minute, 
+                second=start_time.second, 
+                microsecond=0
+            )
+            
+            print(f"   다음 매매 시작 시간: {next_market_open.strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            while datetime.now() < next_market_open:
+                wait_seconds = (next_market_open - datetime.now()).total_seconds()
+                wait_hours = int(wait_seconds // 3600)
+                wait_minutes = int((wait_seconds % 3600) // 60)
+                
+                print(f"   ... 다음 거래 시작까지 약 {wait_hours}시간 {wait_minutes}분 남음", end="\r")
+                
+                # 9시 1분 전까지는 1분 단위로 체크
+                if wait_seconds > 60:
+                    time.sleep(60)
+                else:
+                    time.sleep(1)  # 1분 이내로 남으면 1초 단위로 체크
+
+        # --- `while True` 루프 종료 (실행될 일 없음, 예외 발생 시 finally로) ---
+
+    except KeyboardInterrupt:
+        print("\n\n🛑 사용자에 의해 프로그램이 중지되었습니다. (Ctrl+C)")
+        
+    except Exception as e:
+        print(f"\n\n❌ 치명적인 오류 발생: {e}")
+        traceback.print_exc()
+        
+    finally:
+        # ==================================================================
+        #  프로그램 종료 시 리소스 정리
+        # ==================================================================
+        print("\n" + "-"*30 + " 프로그램 종료 (리소스 정리) " + "-"*30)
+        
+        # 토큰이 남아있으면 반납
+        if main_config_obj and main_config_obj.access_token:
+            print("   ... 미처 반납되지 않은 토큰을 반납합니다.")
+            main_config_obj.revoke_token()
+        
+        # 웹소켓 연결 종료
+        if main_basket_ws_obj:
+            print("   ... 바스켓 웹소켓 연결을 종료합니다.")
+            main_basket_ws_obj.close()
+        
+        if main_monitoring_ws_obj:
+            print("   ... 모니터링 웹소켓 연결을 종료합니다.")
+            main_monitoring_ws_obj.close()
+        
+        print("   모든 리소스를 정리했습니다. 프로그램을 종료합니다.")
