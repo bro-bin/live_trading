@@ -691,24 +691,14 @@ basket_optimization_counter = 0
 cached_basket_quantities = None
 
 ### 조건에 따른 매매 실행 함수
-def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket, monitoring_ws: MonitoringWebSocket):
+def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket, 
+                     monitoring_ws: MonitoringWebSocket, 
+                     current_position_type: str):  
     """
     매매 로직 실행 (1초마다 호출)
     
-    [동작]
-    - 매 1초: diff 모니터링 + 로그 출력 + 매매 조건 체크 + 조건 충족 시 즉시 실행
-    - 5초마다: 바스켓 수량 최적화 계산
-    
-    매매 조건:
-        1. diff >= -5 and position == "none" → 바스켓 매수
-        2. diff <= -8 and position == "holding_basket" → 바스켓 매도
-        3. diff <= -11 and position == "none" → ETF 매수
-        4. diff >= -8 and position == "holding_etf" → ETF 매도
-    
-    Args:
-        config: KISConfig 객체
-        basket_ws: 바스켓 웹소켓
-        monitoring_ws: 모니터링 웹소켓
+    Returns:
+        str: 업데이트된 포지션 상태 (매매 발생 시 변경됨)
     """
     
     global basket_optimization_counter, cached_basket_quantities
@@ -716,33 +706,33 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket, monitoring_
     timestamp = datetime.now().strftime("%H:%M:%S")
     
     try:
-        # ====================================================================
-        # STEP 1: diff 모니터링 및 로그 출력 (매 1초)
-        # ====================================================================
+        # STEP 1: diff 모니터링
         diff_info = monitoring_ws.get_diff_info()
-        nav = diff_info.get("nav")
+        nav = diff_info.get("calculated_nav")
         current_price = diff_info.get("current_price")
         diff = diff_info.get("diff")
         diff_rate = diff_info.get("diff_rate")
         
         if nav is not None and current_price is not None and diff is not None:
-            print(f"[{timestamp}] 📊 NAV: {nav:>8,.0f}원 | "
+            print(f"[{timestamp}] 📊 계산NAV: {nav:>8,.0f}원 | "
                   f"💰 현재가: {current_price:>8,}원 | "
                   f"📉 diff: {diff:>6,.0f}원 ({diff_rate:>+6.2f}%)")
         else:
-            print(f"[{timestamp}] ⏳ 데이터 수신 대기 중... "
-                  f"(NAV: {nav}, 현재가: {current_price})")
-            return  # 데이터 없으면 조기 종료
+            print(f"[{timestamp}] ⏳ 데이터 수신 대기 중...")
+            return current_position_type
         
-        # ====================================================================
-        # STEP 2: 바스켓 수량 최적화 (5초마다)
-        # ====================================================================
+        # STEP 2: 바스켓 수량 최적화
         basket_optimization_counter += 1
         
         if basket_optimization_counter >= 5:
             live_basket_prices = basket_ws.get_current_prices()
             
-            if len(live_basket_prices) >= len(basket_ws.stock_list):
+            valid_prices = all(
+                p.get("price", 0) > 0 
+                for p in live_basket_prices.values()
+            )
+            
+            if len(live_basket_prices) >= len(basket_ws.stock_list) and valid_prices:
                 try:
                     from utils import get_basket_qty
                     cached_basket_quantities = get_basket_qty(live_basket_prices)
@@ -750,19 +740,14 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket, monitoring_
                 except Exception as e:
                     print(f"[{timestamp}] ⚠️  바스켓 최적화 오류: {e}")
             else:
-                print(f"[{timestamp}] ⚠️  바스켓 가격 데이터 부족 "
-                      f"({len(live_basket_prices)}/{len(basket_ws.stock_list)})")
+                print(f"[{timestamp}] ⚠️  바스켓 가격 데이터 부족 또는 무효")
             
-            basket_optimization_counter = 0  # 카운터 초기화
+            basket_optimization_counter = 0
         
-        # ====================================================================
-        # STEP 3: 현재 포지션 확인
-        # ====================================================================
-        position = get_current_position(config)
+        # STEP 3: 현재 포지션 사용 (매개변수)
+        position = current_position_type
         
-        # ====================================================================
         # STEP 4: tr_id 설정
-        # ====================================================================
         if config.is_real:
             buy_tr_id = "TTTC0802U"
             sell_tr_id = "TTTC0801U"
@@ -770,9 +755,7 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket, monitoring_
             buy_tr_id = "VTTC0802U"
             sell_tr_id = "VTTC0801U"
         
-        # ====================================================================
-        # STEP 5: 매매 조건 체크 및 즉시 실행
-        # ====================================================================
+        # STEP 5: 매매 조건 체크 및 실행
         
         # 조건 1: diff >= -5 and position == "none" → 바스켓 매수
         if diff >= -5 and position == "none":
@@ -781,10 +764,9 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket, monitoring_
                 print(f"⚡ [{timestamp}] [조건 1 충족] diff >= -5 & 포지션 없음 → 바스켓 매수")
                 print(f"{'='*80}")
                 
-                # 최신 가격 정보 가져오기
                 live_basket_prices = basket_ws.get_current_prices()
                 
-                buy_basket_direct(
+                result = buy_basket_direct(
                     access_token=config.access_token,
                     base_url=config.base_url,
                     app_key=config.app_key,
@@ -793,6 +775,16 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket, monitoring_
                     tr_id=buy_tr_id,
                     live_prices=live_basket_prices
                 )
+                
+                # ✅ 수정: 성공 종목이 있을 때만 포지션 변경
+                if result.get("rt_cd") == "0" and result.get("success"):
+                    position = "holding_basket"
+                    print(f"\n✅ 포지션 업데이트: none → holding_basket")
+                    print(f"   성공: {len(result['success'])}개 종목")
+                    print(f"   실패: {len(result.get('failed', []))}개 종목")
+                else:
+                    print(f"\n⚠️  바스켓 매수 실패 - 포지션 유지")
+                
                 print(f"{'='*80}\n")
             else:
                 print(f"[{timestamp}] ⚠️  조건 충족하나 바스켓 최적화 대기 중...")
@@ -800,10 +792,10 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket, monitoring_
         # 조건 2: diff <= -8 and position == "holding_basket" → 바스켓 매도
         elif diff <= -8 and position == "holding_basket":
             print(f"\n{'='*80}")
-            print(f"⚡ [{timestamp}] [조건 2 충족] diff <= -8 & 바스켓 보유 중 → 바스켓 매도")
+            print(f"⚡ [{timestamp}] [조건 2 충족] diff <= -8 & 바스켓 보유 → 바스켓 매도")
             print(f"{'='*80}")
             
-            sell_basket(
+            result = sell_basket(
                 access_token=config.access_token,
                 base_url=config.base_url,
                 app_key=config.app_key,
@@ -811,6 +803,16 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket, monitoring_
                 account_no=config.account_no,
                 tr_id=sell_tr_id
             )
+            
+            # ✅ 수정: 성공 종목이 있을 때만 포지션 변경
+            if result.get("rt_cd") == "0" and result.get("success"):
+                position = "none"
+                print(f"\n✅ 포지션 업데이트: holding_basket → none")
+                print(f"   성공: {len(result['success'])}개 종목")
+                print(f"   실패: {len(result.get('failed', []))}개 종목")
+            else:
+                print(f"\n⚠️  바스켓 매도 실패 - 포지션 유지")
+            
             print(f"{'='*80}\n")
         
         # 조건 3: diff <= -11 and position == "none" → ETF 매수
@@ -819,7 +821,7 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket, monitoring_
             print(f"⚡ [{timestamp}] [조건 3 충족] diff <= -11 & 포지션 없음 → ETF 매수")
             print(f"{'='*80}")
             
-            buy_etf(
+            result = buy_etf(
                 access_token=config.access_token,
                 base_url=config.base_url,
                 app_key=config.app_key,
@@ -827,15 +829,25 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket, monitoring_
                 account_no=config.account_no,
                 tr_id=buy_tr_id
             )
+            
+            # ✅ 수정: 체결 완료 확인 후 포지션 변경
+            if result.get("rt_cd") == "0" and result.get("filled"):
+                position = "holding_etf"
+                print(f"\n✅ 포지션 업데이트: none → holding_etf")
+                print(f"   체결가: {result['filled_price']:,}원")
+                print(f"   수량: {result['filled_qty']}주")
+            else:
+                print(f"\n⚠️  ETF 매수 실패 - 포지션 유지")
+            
             print(f"{'='*80}\n")
         
         # 조건 4: diff >= -8 and position == "holding_etf" → ETF 매도
         elif diff >= -8 and position == "holding_etf":
             print(f"\n{'='*80}")
-            print(f"⚡ [{timestamp}] [조건 4 충족] diff >= -8 & ETF 보유 중 → ETF 매도")
+            print(f"⚡ [{timestamp}] [조건 4 충족] diff >= -8 & ETF 보유 → ETF 매도")
             print(f"{'='*80}")
             
-            sell_etf(
+            result = sell_etf(
                 access_token=config.access_token,
                 base_url=config.base_url,
                 app_key=config.app_key,
@@ -843,12 +855,27 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket, monitoring_
                 account_no=config.account_no,
                 tr_id=sell_tr_id
             )
+            
+            # ✅ 수정: 체결 완료 확인 후 포지션 변경
+            if result.get("rt_cd") == "0" and result.get("filled"):
+                position = "none"
+                print(f"\n✅ 포지션 업데이트: holding_etf → none")
+                print(f"   체결가: {result['filled_price']:,}원")
+                print(f"   수량: {result['filled_qty']}주")
+                print(f"   손익: {result.get('profit', 0):,}원")
+            else:
+                print(f"\n⚠️  ETF 매도 실패 - 포지션 유지")
+            
             print(f"{'='*80}\n")
         
+        # ✅ 추가: 업데이트된 포지션 반환
+        return position
+        
     except Exception as e:
-        print(f"❌ [{timestamp}] 매매 로직 실행 중 오류: {e}")
+        print(f"❌ 매매 로직 실행 중 오류: {e}")
         import traceback
         traceback.print_exc()
+        return current_position_type  # 오류 발생 시 기존 포지션 유지
 
 
 # =============================== end =======================================
@@ -884,10 +911,6 @@ if __name__ == "__main__":
     main_config_obj = None
     main_basket_ws_obj = None
     main_monitoring_ws_obj = None
-    
-    # ✅ 추가: 바스켓 최적화용 전역 변수
-    basket_optimization_counter = 0
-    cached_basket_quantities = None
 
     try:
         # ==================================================================
@@ -969,15 +992,27 @@ if __name__ == "__main__":
                 basket_optimization_counter = 0
                 cached_basket_quantities = None
 
+                # ✅ 추가: 장 시작 시 포지션 확인 (1회만)
+                print("\n" + "-"*30 + " 2-2. 초기 포지션 확인 " + "-"*30)
+                current_position_type = get_current_position(main_config_obj)
+
+                print("\n" + "-"*30 + " 3. 매매 로직 실행 " + "-"*30)
+                print("   📊 diff 모니터링: 1초마다")
+                print("   🔄 바스켓 최적화: 5초마다")
+                print("   ⚡ 매매 실행: 조건 충족 시 즉시")
+                print("-"*80 + "\n")
+
                 # ✅ 메인 루프: 1초마다 run_trading_logic 호출
                 while datetime.now().time() <= end_time:
                     loop_start_time = time.monotonic()
                     
                     # (순서 3) 매매 로직 함수 호출 (1초마다)
-                    run_trading_logic(
+                    # ✅ 수정: 반환값으로 포지션 업데이트
+                    current_position_type = run_trading_logic(
                         main_config_obj, 
                         main_basket_ws_obj, 
-                        main_monitoring_ws_obj
+                        main_monitoring_ws_obj,
+                        current_position_type  # ✅ 현재 포지션 전달
                     )
                     
                     # 1초 간격 유지

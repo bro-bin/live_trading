@@ -3,7 +3,7 @@ import json
 import time
 import pandas as pd
 from datetime import datetime
-from utils import get_basket_qty
+from utils import get_basket_qty, SAMSUNG_STOCKS
 
 # ==============================================================================
 # ===================== part 1. 전역 변수: 거래 기록 관리 ======================
@@ -437,32 +437,13 @@ def buy_basket_direct(access_token, base_url, app_key, app_secret, account_no,
     
     try:
         # 1. 바스켓 수량 가져오기
-        # ✅ 수정: get_basket_qty가 {종목코드: 수량}을 반환
         basket_qty = get_basket_qty(live_prices)
         
-        # 종목 코드 → 종목명 매핑 (출력용)
-        stock_names = {
-            "028050": "삼성E&A",
-            "006400": "삼성SDI",
-            "028260": "삼성물산",
-            "032830": "삼성생명",
-            "018260": "삼성에스디에스",
-            "009150": "삼성전기",
-            "005930": "삼성전자",
-            "010140": "삼성중공업",
-            "016360": "삼성증권",
-            "029780": "삼성카드",
-            "000810": "삼성화재",
-            "012750": "에스원",
-            "030000": "제일기획",
-            "008770": "호텔신라"
-        }
-        
+        # ✅ 수정: 상수 사용 (하드코딩 제거)
         print(f"\n📋 매수 예정 종목:")
         total_stocks = len(basket_qty)
-        # ✅ 수정: basket_qty가 이미 {종목코드: 수량} 형태
         for i, (stock_code, qty) in enumerate(basket_qty.items(), 1):
-            name = stock_names.get(stock_code, "알 수 없음")
+            name = SAMSUNG_STOCKS.get(stock_code, "알 수 없음")  # ✅ 변경
             print(f"   [{i:2d}/{total_stocks}] {name:15s} ({stock_code}): {qty:3d}주")
         print(f"{'='*80}\n")
         
@@ -472,9 +453,8 @@ def buy_basket_direct(access_token, base_url, app_key, app_secret, account_no,
         failed_orders = []
         total_amount = 0
         
-        # ✅ 수정: 이제 stock_code를 직접 사용 가능
         for idx, (stock_code, quantity) in enumerate(basket_qty.items(), 1):
-            stock_name = stock_names.get(stock_code, "알 수 없음")
+            stock_name = SAMSUNG_STOCKS.get(stock_code, "알 수 없음")  # ✅ 변경
             
             print(f"\n[{idx}/{total_stocks}] {stock_name} ({stock_code}) {quantity}주 매수 중...")
             
