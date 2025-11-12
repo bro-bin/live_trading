@@ -40,6 +40,7 @@ class KISConfig:
         
         # 접근 토큰
         self.access_token = None
+        self.ws_approval_key = None  # ⬅️ [추가] 웹소켓 접속키 저장 변수
         
         print(f"✅ 설정 로드 완료")
         print(f"   - 환경: {'실전투자' if self.is_real else '모의투자'}")
@@ -109,6 +110,38 @@ class KISConfig:
         except Exception as e:
             print(f"❌ 토큰 반납 중 오류: {e}")
             return False
+    
+    def issue_websocket_key(self):
+        """[공통] 웹소켓 접속키 발급 (1회성)"""
+        try:
+            print("🔑 [공통] 웹소켓 접속키 발급 중...")
+            
+            url = f"{self.base_url}/oauth2/Approval"
+            headers = {"content-type": "application/json"}
+            body = {
+                "grant_type": "client_credentials",
+                "appkey": self.app_key,
+                "secretkey": self.app_secret
+            }
+            
+            response = requests.post(url, headers=headers, data=json.dumps(body))
+            
+            if response.status_code == 200:
+                result = response.json()
+                self.ws_approval_key = result.get('approval_key') # ⬅️ 공통 변수에 저장
+                if self.ws_approval_key:
+                    print(f"✅ [공통] 웹소켓 접속키 발급 성공")
+                    return True
+                else:
+                    print("❌ 응답에 approval_key가 없습니다.")
+                    return False
+            else:
+                print(f"❌ [공통] 웹소켓 접속키 발급 실패: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ [공통] 웹소켓 접속키 발급 중 오류: {e}")
+            return False
 
 
 # ==============================================================================
@@ -121,7 +154,6 @@ class BasketWebSocket:
         """초기화"""
         self.config = config
         self.ws = None
-        self.ws_approval_key = None
         self.is_connected = False
         
         # 실시간 가격 저장
@@ -148,45 +180,15 @@ class BasketWebSocket:
         
         print(f"\n📦 바스켓 웹소켓 초기화 ({len(self.stock_list)}개 종목)")
     
-    def _issue_websocket_key(self):
-        """웹소켓 접속키 발급"""
-        try:
-            print("🔑 바스켓 웹소켓 접속키 발급 중...")
-            
-            url = f"{self.config.base_url}/oauth2/Approval"
-            headers = {"content-type": "application/json"}
-            body = {
-                "grant_type": "client_credentials",
-                "appkey": self.config.app_key,
-                "secretkey": self.config.app_secret
-            }
-            
-            response = requests.post(url, headers=headers, data=json.dumps(body))
-            
-            if response.status_code == 200:
-                result = response.json()
-                self.ws_approval_key = result.get('approval_key')
-                if self.ws_approval_key:
-                    print(f"✅ 바스켓 웹소켓 접속키 발급 성공")
-                    return True
-                else:
-                    print("❌ 응답에 approval_key가 없습니다.")
-                    return False
-            else:
-                print(f"❌ 웹소켓 접속키 발급 실패: {response.status_code}")
-                return False
-                
-        except Exception as e:
-            print(f"❌ 웹소켓 접속키 발급 중 오류: {e}")
-            return False
     
     def connect(self):
         """웹소켓 연결"""
         try:
             print("\n🌐 바스켓 웹소켓 연결 시작...")
             
-            # 1. 접속키 발급
-            if not self._issue_websocket_key():
+            # 1. [수정] 공통 접속키가 있는지 확인
+            if not self.config.ws_approval_key:
+                print("❌ 바스켓 WS: 공통 접속키가 없습니다.")
                 return False
             
             # 2. 웹소켓 연결
@@ -232,7 +234,7 @@ class BasketWebSocket:
             for stock_name, stock_code in self.stock_list.items():
                 subscribe_data = {
                     "header": {
-                        "approval_key": self.ws_approval_key,
+                        "approval_key": self.config.ws_approval_key,
                         "custtype": "P",
                         "tr_type": "1",
                         "content-type": "utf-8"
@@ -305,12 +307,37 @@ class BasketWebSocket:
             
             # JSON 응답 (구독 확인)
             elif message.startswith('{'):
-                msg_json = json.loads(message)
-                if msg_json.get('body', {}).get('rt_cd') == '0':
-                    print(f"  ✓ 구독 성공")
+                try:
+                    msg_json = json.loads(message)
+                    header = msg_json.get('header', {})
+                    body = msg_json.get('body', {})
+                    tr_key = header.get('tr_key', 'N/A')
+
+                    if body.get('rt_cd') == '0':
+                        # 어떤 종목이 성공했는지 확인
+                        stock_name = "N/A"
+                        for name, code in self.stock_list.items():
+                            if code == tr_key:
+                                stock_name = name
+                                break
+                        print(f"==================================================")
+                        print(f" ✅ [WS 구독 성공] {stock_name} ({tr_key})")
+                        print(f"==================================================")
+                    else:
+                        # 실패 시 에러 로그 출력
+                        print(f"==================================================")
+                        print(f" ❌ [WS 구독 실패] 종목코드: {tr_key}")
+                        print(f"    - 응답 코드: {body.get('rt_cd')}")
+                        print(f"    - 응답 메시지: {body.get('msg1')}")
+                        print(f"==================================================")
+
+                except Exception as e:
+                    print(f"⚠️  JSON 응답 처리 오류: {e} | 원본: {message}")
+            
         
         except Exception as e:
             print(f"⚠️  메시지 처리 오류: {e}")
+            
     
     def _on_error(self, ws, error):
         """에러"""
@@ -342,7 +369,6 @@ class MonitoringWebSocket:
         """초기화"""
         self.config = config
         self.ws = None
-        self.ws_approval_key = None
         self.is_connected = False
         
         # ETF 정보
@@ -363,41 +389,14 @@ class MonitoringWebSocket:
         print(f"\n🔍 모니터링 웹소켓 초기화")
         print(f"   - 종목: {self.etf_name} ({self.etf_code})")
     
-    def _issue_websocket_key(self):
-        """웹소켓 접속키 발급"""
-        try:
-            print("🔑 모니터링 웹소켓 접속키 발급 중...")
-            
-            url = f"{self.config.base_url}/oauth2/Approval"
-            headers = {"content-type": "application/json"}
-            body = {
-                "grant_type": "client_credentials",
-                "appkey": self.config.app_key,
-                "secretkey": self.config.app_secret
-            }
-            
-            response = requests.post(url, headers=headers, data=json.dumps(body))
-            
-            if response.status_code == 200:
-                result = response.json()
-                self.ws_approval_key = result['approval_key']
-                print(f"✅ 모니터링 웹소켓 접속키 발급 성공")
-                return True
-            else:
-                print(f"❌ 웹소켓 접속키 발급 실패: {response.status_code}")
-                return False
-                
-        except Exception as e:
-            print(f"❌ 웹소켓 접속키 발급 중 오류: {e}")
-            return False
-    
     def connect(self):
         """웹소켓 연결"""
         try:
             print("\n🌐 모니터링 웹소켓 연결 시작...")
             
-            # 1. 접속키 발급
-            if not self._issue_websocket_key():
+            # 1. [수정] 공통 접속키가 있는지 확인
+            if not self.config.ws_approval_key:
+                print("❌ 모니터링 WS: 공통 접속키가 없습니다.")
                 return False
             
             # 2. 웹소켓 연결
@@ -443,7 +442,7 @@ class MonitoringWebSocket:
             # 1. NAV 구독
             nav_subscribe = {
                 "header": {
-                    "approval_key": self.ws_approval_key,
+                    "approval_key": self.config.ws_approval_key,
                     "custtype": "P",
                     "tr_type": "1",
                     "content-type": "utf-8"
@@ -462,7 +461,7 @@ class MonitoringWebSocket:
             # 2. 현재가 구독
             price_subscribe = {
                 "header": {
-                    "approval_key": self.ws_approval_key,
+                    "approval_key": self.config.ws_approval_key,
                     "custtype": "P",
                     "tr_type": "1",
                     "content-type": "utf-8"
@@ -708,13 +707,13 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
     try:
         # STEP 1: diff 모니터링
         diff_info = monitoring_ws.get_diff_info()
-        nav = diff_info.get("calculated_nav")
+        nav = diff_info.get("nav")
         current_price = diff_info.get("current_price")
         diff = diff_info.get("diff")
         diff_rate = diff_info.get("diff_rate")
         
         if nav is not None and current_price is not None and diff is not None:
-            print(f"[{timestamp}] 📊 계산NAV: {nav:>8,.0f}원 | "
+            print(f"[{timestamp}] 📊 NAV: {nav:>8,.0f}원 | "
                   f"💰 현재가: {current_price:>8,}원 | "
                   f"📉 diff: {diff:>6,.0f}원 ({diff_rate:>+6.2f}%)")
         else:
@@ -924,6 +923,11 @@ if __name__ == "__main__":
         
         # 1-1. (순서 1) 웹소켓 연결
         print("\n" + "-"*30 + " 1. 웹소켓 연결 " + "-"*30)
+
+        # ⬇️ [추가] 두 connect 호출 전에 공통 키를 1회 발급합니다.
+        if not main_config_obj.issue_websocket_key():
+            raise Exception("공통 웹소켓 접속키 발급에 실패했습니다.")
+        
         if not main_basket_ws_obj.connect():
             raise Exception("바스켓 웹소켓(BasketWebSocket) 연결에 실패했습니다.")
         
