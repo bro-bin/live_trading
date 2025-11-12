@@ -265,6 +265,10 @@ class BasketWebSocket:
     def _on_message(self, ws, message):
         """메시지 수신"""
         try:
+            # ✅ 추가: PINGPONG을 제외한 모든 메시지 출력
+            if message != "PINGPONG":
+                print(f"[DEBUG 바스켓] 메시지 수신: {message[:150]}")  # 처음 150자
+            
             # PINGPONG 처리
             if message == "PINGPONG":
                 ws.pong(message)
@@ -274,13 +278,18 @@ class BasketWebSocket:
             if message.startswith('0|') or message.startswith('1|'):
                 parts = message.split('|')
                 if len(parts) < 4:
+                    print(f"[DEBUG 바스켓] ⚠️ parts 부족: {len(parts)}")
                     return
                 
                 tr_id = parts[1]
                 data_body = parts[3]
                 
+                print(f"[DEBUG 바스켓] TR_ID={tr_id}, 데이터 길이={len(data_body)}")
+                
                 if tr_id == "H0STCNT0":  # 체결가
                     data_parts = data_body.split('^')
+                    print(f"[DEBUG 바스켓] 체결가 필드 개수: {len(data_parts)}, 앞 5개: {data_parts[:5]}")
+                    
                     if len(data_parts) >= 3:
                         stock_code = data_parts[0]
                         current_price = int(data_parts[2])
@@ -294,23 +303,31 @@ class BasketWebSocket:
                         
                         if stock_name:
                             with self.price_lock:
-                                # ✅ 수정: 가격과 종목코드를 함께 저장
                                 self.current_prices[stock_name] = {
                                     "price": current_price,
                                     "code": stock_code
                                 }
                             
                             timestamp = datetime.now().strftime("%H:%M:%S")
-                            print(f"[{timestamp}] 📈 {stock_name}: {current_price:,}원")
+                            print(f"[{timestamp}] 📈 {stock_name}: {current_price:,}원 (총 {len(self.current_prices)}/14)")
+                        else:
+                            print(f"[DEBUG 바스켓] ⚠️ 종목코드 매칭 실패: {stock_code}")
             
             # JSON 응답 (구독 확인)
             elif message.startswith('{'):
                 msg_json = json.loads(message)
-                if msg_json.get('body', {}).get('rt_cd') == '0':
+                print(f"[DEBUG 바스켓] JSON 응답: {msg_json}")
+                
+                rt_cd = msg_json.get('body', {}).get('rt_cd')
+                if rt_cd == '0':
                     print(f"  ✓ 구독 성공")
+                elif rt_cd:
+                    print(f"  ✗ 구독 실패: rt_cd={rt_cd}, msg={msg_json.get('body', {}).get('msg1')}")
         
         except Exception as e:
             print(f"⚠️  메시지 처리 오류: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _on_error(self, ws, error):
         """에러"""
@@ -708,7 +725,7 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
     try:
         # STEP 1: diff 모니터링
         diff_info = monitoring_ws.get_diff_info()
-        nav = diff_info.get("calculated_nav")
+        nav = diff_info.get("nav")
         current_price = diff_info.get("current_price")
         diff = diff_info.get("diff")
         diff_rate = diff_info.get("diff_rate")
@@ -741,6 +758,18 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
                     print(f"[{timestamp}] ⚠️  바스켓 최적화 오류: {e}")
             else:
                 print(f"[{timestamp}] ⚠️  바스켓 가격 데이터 부족 또는 무효")
+                # 상세 디버그 출력
+                with basket_ws.price_lock:
+                    received_keys = list(live_basket_prices.keys())
+                    sample = dict(list(live_basket_prices.items())[:5])
+                expected_keys = list(basket_ws.stock_list.keys())
+                missing = [k for k in expected_keys if k not in received_keys]
+                zero_prices = [k for k,v in live_basket_prices.items() if v.get("price", 0) <= 0]
+                print(f"   연결상태: is_connected={basket_ws.is_connected}, approval_key_present={bool(basket_ws.ws_approval_key)}")
+                print(f"   수신종목수/기대종목수: {len(received_keys)}/{len(expected_keys)}")
+                print(f"   누락종목: {missing}")
+                print(f"   0또는음수가격종목: {zero_prices}")
+                print(f"   샘플데이터(최대5): {sample}")
             
             basket_optimization_counter = 0
         
