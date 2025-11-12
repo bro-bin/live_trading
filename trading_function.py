@@ -29,8 +29,7 @@ current_position = {
 
 ### 체결여부 확인 함수 
 def _check_order_filled(access_token, base_url, app_key, app_secret, 
-                        account_no, order_no, tr_id, sll_buy_dvsn_cd="00",
-                        max_attempts=60):
+                        account_no, order_no, tr_id, max_attempts=60):
     """
     Args:
         access_token: 접근 토큰
@@ -61,12 +60,10 @@ def _check_order_filled(access_token, base_url, app_key, app_secret,
             params = {
                 "CANO": cano,
                 "ACNT_PRDT_CD": acnt_prdt_cd,
-                "CTX_AREA_FK100": "",  # 연속조회검색조건100
-                "CTX_AREA_NK100": "",  # 연속조회키100
-                "INQR_DVSN": "00",  # ✅ 수정: 조회구분 (00:전체, 01:매도, 02:매수)
-                "SLL_BUY_DVSN_CD": sll_buy_dvsn_cd,   # 매도매수구분코드
-                "INQR_STRT_DT": datetime.now().strftime("%Y%m%d"),
-                "INQR_END_DT": datetime.now().strftime("%Y%m%d")
+                "CTX_AREA_FK100": "",
+                "CTX_AREA_NK100": "",
+                "INQR_DVSN_1": "0",  # 전체
+                "INQR_DVSN_2": "0"   # 전체
             }
             
             response = requests.get(url, headers=headers, params=params)
@@ -97,10 +94,8 @@ def _check_order_filled(access_token, base_url, app_key, app_secret,
                     if not order_found:
                         print(f"✅ 주문 체결 완료 (주문번호: {order_no})")
                         return True
-                # 상세 에러 로깅 추가
                 else:
                     print(f"⚠️  미체결 조회 응답 오류: {data.get('msg1')}")
-                    print(f"   전체 응답: {response.text}")
             else:
                 print(f"⚠️  미체결 조회 실패: {response.status_code}")
         
@@ -1165,6 +1160,3 @@ def clear_all_stocks(access_token, base_url, app_key, app_secret, account_no, tr
         import traceback
         traceback.print_exc()
         return {"rt_cd": "-1", "msg1": str(e)}
-
-
-
