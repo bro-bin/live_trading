@@ -302,8 +302,8 @@ class BasketWebSocket:
                                     "code": stock_code
                                 }
                             
-                            timestamp = datetime.now().strftime("%H:%M:%S")
-                            print(f"[{timestamp}] 📈 {stock_name}: {current_price:,}원")
+                            # timestamp = datetime.now().strftime("%H:%M:%S")
+                            # print(f"[{timestamp}] 📈 {stock_name}: {current_price:,}원")
             
             # JSON 응답 (구독 확인)
             elif message.startswith('{'):
@@ -380,7 +380,6 @@ class MonitoringWebSocket:
             "nav": None,
             "current_price": None,
             "diff": None,
-            "diff_rate": None,
             "nav_time": None,
             "price_time": None
         }
@@ -552,7 +551,6 @@ class MonitoringWebSocket:
         
         if nav is not None and price is not None and nav != 0:
             self.etf_data["diff"] = price - nav
-            self.etf_data["diff_rate"] = (self.etf_data["diff"] / nav) * 100
     
     def _on_error(self, ws, error):
         """에러"""
@@ -652,7 +650,7 @@ def get_current_position(config: KISConfig) -> str:
         
         # 보유 종목 확인
         has_etf = False
-        has_basket = False
+        basket_stock_count = 0
         
         for item in holdings:
             stock_code = item.get('pdno', '')
@@ -662,18 +660,25 @@ def get_current_position(config: KISConfig) -> str:
                 if stock_code == etf_code:
                     has_etf = True
                     print(f"  📊 ETF 보유: {stock_code} ({quantity}주)")
+                    break
                 elif stock_code in samsung_codes:
-                    has_basket = True
+                    basket_stock_count += 1  # ⬅️ [수정] 바스켓 종목 수 카운트
                     stock_name = item.get('prdt_name', stock_code)
                     print(f"  📦 바스켓 종목: {stock_name} ({quantity}주)")
         
         # 포지션 판단
+         #1. ETF 우선 체크
         if has_etf:
             print("✅ 현재 포지션: ETF 보유 중")
             return "holding_etf"
-        elif has_basket:
-            print("✅ 현재 포지션: 바스켓 보유 중")
+         #2. 바스켓 체크
+        BASKET_COMPLETE_THRESHOLD = len(samsung_codes)
+
+        if basket_stock_count >= BASKET_COMPLETE_THRESHOLD:
+            print(f"✅ 현재 포지션: 바스켓 보유 중 ({basket_stock_count}/{len(samsung_codes)}개)")
             return "holding_basket"
+        
+         #3. 포지션 없음
         else:
             print("✅ 현재 포지션: 없음")
             return "none"
@@ -710,14 +715,16 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
         nav = diff_info.get("nav")
         current_price = diff_info.get("current_price")
         diff = diff_info.get("diff")
-        diff_rate = diff_info.get("diff_rate")
         
         if nav is not None and current_price is not None and diff is not None:
-            print(f"[{timestamp}] 📊 NAV: {nav:>8,.0f}원 | "
-                  f"💰 현재가: {current_price:>8,}원 | "
-                  f"📉 diff: {diff:>6,.0f}원 ({diff_rate:>+6.2f}%)")
+            print(f"[{timestamp}] 📊 NAV: {nav:>8,.0f}원\n"
+                  f"           💰 현재가: {current_price:>8,}원\n"
+                  f"           🔍 괴리(diff): {diff:>+6,.0f}원\n"
+                  f"           📦 포지션: {current_position_type}")
         else:
-            print(f"[{timestamp}] ⏳ 데이터 수신 대기 중...")
+            nav_status = f"{nav:,.0f}원" if nav is not None else "수신 대기"
+            price_status = f"{current_price:,}원" if current_price is not None else "수신 대기"
+            print(f"[{timestamp}] ⏳ 데이터 수신 대기 중... (NAV: {nav_status} | ETF현재가: {price_status} | 📦 포지션: {current_position_type})")
             return current_position_type
         
         # STEP 2: 바스켓 수량 최적화

@@ -60,12 +60,22 @@ def _check_order_filled(access_token, base_url, app_key, app_secret,
             params = {
                 "CANO": cano,
                 "ACNT_PRDT_CD": acnt_prdt_cd,
+                # "CTX_AREA_FK100": "",
+                # "CTX_AREA_NK100": "",
+                # "INQR_DVSN_1": "0",  # 전체
+                # "INQR_DVSN_2": "0"   # 전체
+                # 필수 조회 기간 추가
+                "INQR_STRT_DT": datetime.now().strftime("%Y%m%d"),
+                "INQR_END_DT": datetime.now().strftime("%Y%m%d"),
+                # 추가 필드(문서 확인 필요: 필요 시 값 조정)
                 "CTX_AREA_FK100": "",
                 "CTX_AREA_NK100": "",
                 "INQR_DVSN_1": "0",  # 전체
                 "INQR_DVSN_2": "0"   # 전체
             }
-            
+            # 디버그: 보낸 파라미터 출력
+            print(f"DEBUG: _check_order_filled params={params}")
+
             response = requests.get(url, headers=headers, params=params)
             
             if response.status_code == 200:
@@ -96,6 +106,7 @@ def _check_order_filled(access_token, base_url, app_key, app_secret,
                         return True
                 else:
                     print(f"⚠️  미체결 조회 응답 오류: {data.get('msg1')}")
+                    print(f"   전체 응답: {response.text}")
             else:
                 print(f"⚠️  미체결 조회 실패: {response.status_code}")
         
