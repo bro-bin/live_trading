@@ -257,6 +257,41 @@ class BasketWebSocket:
         except Exception as e:
             print(f"❌ 구독 중 오류: {e}")
             return False
+        
+    def unsubscribe(self):
+        """개별 종목 구독 해제"""
+        if not self.is_connected or not self.ws:
+            print("⚠️  웹소켓이 연결되지 않아 구독 해제를 건너뜁니다.")
+            return False
+        
+        print("\n📡 바스켓 종목 구독 해제 중...")
+        
+        try:
+            for stock_name, stock_code in self.stock_list.items():
+                unsubscribe_data = {
+                    "header": {
+                        "approval_key": self.config.ws_approval_key,
+                        "custtype": "P",
+                        "tr_type": "2",  # ✅ "1"(구독) → "2"(해제)
+                        "content-type": "utf-8"
+                    },
+                    "body": {
+                        "input": {
+                            "tr_id": "H0STCNT0",
+                            "tr_key": stock_code
+                        }
+                    }
+                }
+                
+                self.ws.send(json.dumps(unsubscribe_data))
+                time.sleep(0.05)  # 빠르게 해제
+            
+            print(f"✅ 바스켓 {len(self.stock_list)}개 종목 구독 해제 완료!")
+            return True
+        
+        except Exception as e:
+            print(f"⚠️  구독 해제 중 오류 (무시): {e}")
+            return False
     
     def _on_open(self, ws):
         """연결 성공"""
@@ -313,18 +348,8 @@ class BasketWebSocket:
                     body = msg_json.get('body', {})
                     tr_key = header.get('tr_key', 'N/A')
 
-                    if body.get('rt_cd') == '0':
-                        # 어떤 종목이 성공했는지 확인
-                        stock_name = "N/A"
-                        for name, code in self.stock_list.items():
-                            if code == tr_key:
-                                stock_name = name
-                                break
-                        print(f"==================================================")
-                        print(f" ✅ [WS 구독 성공] {stock_name} ({tr_key})")
-                        print(f"==================================================")
-                    else:
-                        # 실패 시 에러 로그 출력
+                    if body.get('rt_cd') != '0':
+                        # 실패 시 에러 로그 출력(상세)
                         print(f"==================================================")
                         print(f" ❌ [WS 구독 실패] 종목코드: {tr_key}")
                         print(f"    - 응답 코드: {body.get('rt_cd')}")
@@ -332,7 +357,7 @@ class BasketWebSocket:
                         print(f"==================================================")
 
                 except Exception as e:
-                    print(f"⚠️  JSON 응답 처리 오류: {e} | 원본: {message}")
+                    print(f"⚠️ JSON 응답 처리 오류: {e} | 원본: {message}")
             
         
         except Exception as e:
@@ -356,7 +381,9 @@ class BasketWebSocket:
     def close(self):
         """연결 종료"""
         if self.ws:
+            
             self.ws.close()
+            print("🔌 바스켓 웹소켓 연결 종료됨")
 
 
 # ==============================================================================
@@ -481,6 +508,58 @@ class MonitoringWebSocket:
         except Exception as e:
             print(f"❌ 구독 중 오류: {e}")
             return False
+        
+    def unsubscribe(self):
+        """ETF 구독 해제"""
+        if not self.is_connected or not self.ws:
+            print("⚠️  웹소켓이 연결되지 않아 구독 해제를 건너뜁니다.")
+            return False
+        
+        print("\n📡 ETF 데이터 구독 해제 중...")
+        
+        try:
+            # 1. NAV 구독 해제
+            nav_unsubscribe = {
+                "header": {
+                    "approval_key": self.config.ws_approval_key,
+                    "custtype": "P",
+                    "tr_type": "2",  # ✅ "1"(구독) → "2"(해제)
+                    "content-type": "utf-8"
+                },
+                "body": {
+                    "input": {
+                        "tr_id": "H0STNAV0",
+                        "tr_key": self.etf_code
+                    }
+                }
+            }
+            self.ws.send(json.dumps(nav_unsubscribe))
+            time.sleep(0.1)
+            
+            # 2. 현재가 구독 해제
+            price_unsubscribe = {
+                "header": {
+                    "approval_key": self.config.ws_approval_key,
+                    "custtype": "P",
+                    "tr_type": "2",  # ✅ "1"(구독) → "2"(해제)
+                    "content-type": "utf-8"
+                },
+                "body": {
+                    "input": {
+                        "tr_id": "H0STCNT0",
+                        "tr_key": self.etf_code
+                    }
+                }
+            }
+            self.ws.send(json.dumps(price_unsubscribe))
+            time.sleep(0.1)
+            
+            print("✅ ETF 데이터 구독 해제 완료!")
+            return True
+            
+        except Exception as e:
+            print(f"⚠️  구독 해제 중 오류 (무시): {e}")
+            return False
     
     def _on_open(self, ws):
         """연결 성공"""
@@ -569,7 +648,9 @@ class MonitoringWebSocket:
     def close(self):
         """연결 종료"""
         if self.ws:
+            
             self.ws.close()
+            print("🔌 모니터링 웹소켓 연결 종료됨")
 
 # =============================== end =======================================
 # ===========================================================================
@@ -717,10 +798,10 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
         diff = diff_info.get("diff")
         
         if nav is not None and current_price is not None and diff is not None:
-            print(f"[{timestamp}] 📊 NAV: {nav:>8,.0f}원\n"
-                  f"           💰 현재가: {current_price:>8,}원\n"
-                  f"           🔍 괴리(diff): {diff:>+6,.0f}원\n"
-                  f"           📦 포지션: {current_position_type}")
+            print(f"[{timestamp}]  📊 NAV: {nav:>8,.0f}원\n"
+                  f"            💰 현재가: {current_price:>8,}원\n"
+                  f"            🔍 diff: {diff:>+6,.0f}원\n"
+                  f"            📦 포지션: {current_position_type}")
         else:
             nav_status = f"{nav:,.0f}원" if nav is not None else "수신 대기"
             price_status = f"{current_price:,}원" if current_price is not None else "수신 대기"
@@ -1105,6 +1186,16 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
         print("\n\n🛑 사용자에 의해 프로그램이 중지되었습니다. (Ctrl+C)")
+        print("   잠시만 기다려주세요. 리소스를 정리하고 있습니다...")
+        
+        # ✅ 추가: 즉시 구독 해제 (finally 블록 전에)
+        if main_basket_ws_obj and main_basket_ws_obj.is_connected:
+            main_basket_ws_obj.unsubscribe()
+        
+        if main_monitoring_ws_obj and main_monitoring_ws_obj.is_connected:
+            main_monitoring_ws_obj.unsubscribe()
+        
+        time.sleep(1)  # 해제 메시지 전송 대기
         
     except Exception as e:
         print(f"\n\n❌ 치명적인 오류 발생: {e}")
@@ -1116,18 +1207,18 @@ if __name__ == "__main__":
         # ==================================================================
         print("\n" + "-"*30 + " 프로그램 종료 (리소스 정리) " + "-"*30)
         
-        # 토큰이 남아있으면 반납
+        # ✅ 순서 1: 웹소켓 구독 해제 및 연결 종료
+        if main_basket_ws_obj:
+            print("   ... 바스켓 웹소켓 구독 해제 및 연결 종료")
+            main_basket_ws_obj.close()  # unsubscribe + close
+        
+        if main_monitoring_ws_obj:
+            print("   ... 모니터링 웹소켓 구독 해제 및 연결 종료")
+            main_monitoring_ws_obj.close()  # unsubscribe + close
+        
+        # ✅ 순서 2: 토큰 반납 (웹소켓 정리 후)
         if main_config_obj and main_config_obj.access_token:
             print("   ... 미처 반납되지 않은 토큰을 반납합니다.")
             main_config_obj.revoke_token()
-        
-        # 웹소켓 연결 종료
-        if main_basket_ws_obj:
-            print("   ... 바스켓 웹소켓 연결을 종료합니다.")
-            main_basket_ws_obj.close()
-        
-        if main_monitoring_ws_obj:
-            print("   ... 모니터링 웹소켓 연결을 종료합니다.")
-            main_monitoring_ws_obj.close()
         
         print("   모든 리소스를 정리했습니다. 프로그램을 종료합니다.")

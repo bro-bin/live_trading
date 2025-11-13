@@ -431,46 +431,47 @@ def sell_etf(access_token, base_url, app_key, app_secret, account_no, tr_id):
         traceback.print_exc()
         return {"rt_cd": "-1", "msg1": str(e)}
 
-### 3) 바스켓 매수 함수
+### 3) 바스켓 매수 함수 (수정본: 주문과 체결 확인 분리)
 def buy_basket_direct(access_token, base_url, app_key, app_secret, account_no,
                       tr_id, live_prices: dict):
     """
     삼성그룹 바스켓(개별 종목들) 매수 함수
-    
-    Args:
-        live_prices: {종목명: {"price": 가격, "code": 종목코드}} 형태
+    [로직 수정]
+    1. 1단계: 모든 종목의 주문을 '먼저' 접수
+    2. 2단계: 접수된 주문들의 체결 여부를 '나중에' 확인
     """
     global current_position
     
     print(f"\n{'='*80}")
-    print(f"🟢 바스켓 매수 주문 시작")
+    print(f"🟢 바스켓 매수 주문 시작 (로직: 선-주문, 후-확인)")
     print(f"{'='*80}")
     
     try:
         # 1. 바스켓 수량 가져오기
         basket_qty = get_basket_qty(live_prices)
         
-        # ✅ 수정: 상수 사용 (하드코딩 제거)
         print(f"\n📋 매수 예정 종목:")
         total_stocks = len(basket_qty)
         for i, (stock_code, qty) in enumerate(basket_qty.items(), 1):
-            name = SAMSUNG_STOCKS.get(stock_code, "알 수 없음")  # ✅ 변경
+            name = SAMSUNG_STOCKS.get(stock_code, "알 수 없음")
             print(f"   [{i:2d}/{total_stocks}] {name:15s} ({stock_code}): {qty:3d}주")
         print(f"{'='*80}\n")
         
-        # 2. 각 종목 매수 실행
         cano, acnt_prdt_cd = account_no.split('-')
-        success_orders = []
-        failed_orders = []
-        total_amount = 0
         
+        pending_orders = [] # 주문 접수 성공 목록
+        failed_orders = []  # 주문 접수 실패 목록
+        
+        # ==========================================================
+        # 1단계: 모든 종목에 대해 '주문 접수' 먼저 실행
+        # ==========================================================
+        print(f"--- 1단계: {total_stocks}개 종목 주문 접수 시작 ---")
         for idx, (stock_code, quantity) in enumerate(basket_qty.items(), 1):
-            stock_name = SAMSUNG_STOCKS.get(stock_code, "알 수 없음")  # ✅ 변경
+            stock_name = SAMSUNG_STOCKS.get(stock_code, "알 수 없음")
             
-            print(f"\n[{idx}/{total_stocks}] {stock_name} ({stock_code}) {quantity}주 매수 중...")
+            print(f"  [{idx}/{total_stocks}] {stock_name} ({stock_code}) {quantity}주 주문 시도...")
             
             try:
-                # 매수 주문
                 url = f"{base_url}/uapi/domestic-stock/v1/trading/order-cash"
                 headers = {
                     "content-type": "application/json; charset=utf-8",
@@ -479,12 +480,11 @@ def buy_basket_direct(access_token, base_url, app_key, app_secret, account_no,
                     "appsecret": app_secret,
                     "tr_id": tr_id
                 }
-                
                 body = {
                     "CANO": cano,
                     "ACNT_PRDT_CD": acnt_prdt_cd,
-                    "PDNO": stock_code,  # ✅ 이미 종목코드
-                    "ORD_DVSN": "01",  # 시장가
+                    "PDNO": stock_code,
+                    "ORD_DVSN": "01", # 시장가
                     "ORD_QTY": str(quantity),
                     "ORD_UNPR": "0"
                 }
@@ -493,91 +493,126 @@ def buy_basket_direct(access_token, base_url, app_key, app_secret, account_no,
                 
                 if response.status_code == 200:
                     result = response.json()
-                    
                     if result.get("rt_cd") == "0":
                         order_no = result["output"]["ODNO"]
-                        print(f"   ✅ 주문 접수 성공 (주문번호: {order_no})")
-                        
-                        # 체결 확인
-                        check_tr_id = "VTTC8001R" if "VTT" in tr_id else "TTTC8001R"
-                        is_filled = _check_order_filled(
-                            access_token, base_url, app_key, app_secret,
-                            account_no, order_no, check_tr_id, max_attempts=30
-                        )
-                        
-                        if is_filled:
-                            # 체결가 조회
-                            filled_price, filled_qty = _get_filled_price(
-                                access_token, base_url, app_key, app_secret,
-                                account_no, order_no, check_tr_id
-                            )
-                            
-                            if filled_price and filled_qty:
-                                amount = filled_price * filled_qty
-                                total_amount += amount
-                                
-                                success_orders.append({
-                                    "code": stock_code,
-                                    "name": stock_name,
-                                    "order_no": order_no,
-                                    "quantity": filled_qty,
-                                    "price": filled_price,
-                                    "amount": amount
-                                })
-                                
-                                print(f"   💰 체결 완료: {filled_price:,}원 x {filled_qty}주 = {amount:,}원")
-                            else:
-                                print(f"   ⚠️  체결가 조회 실패")
-                                failed_orders.append({
-                                    "code": stock_code,
-                                    "name": stock_name,
-                                    "reason": "체결가 조회 실패"
-                                })
-                        else:
-                            print(f"   ⚠️  체결 확인 실패")
-                            failed_orders.append({
-                                "code": stock_code,
-                                "name": stock_name,
-                                "reason": "체결 확인 타임아웃"
-                            })
+                        print(f"    ✅ 주문 접수 성공 (주문번호: {order_no})")
+                        pending_orders.append({
+                            "code": stock_code,
+                            "name": stock_name,
+                            "quantity": quantity,
+                            "order_no": order_no
+                        })
                     else:
-                        print(f"   ❌ 주문 실패: {result.get('msg1')}")
+                        reason = result.get('msg1', '알 수 없는 오류')
+                        print(f"    ❌ 주문 접수 실패: {reason}")
                         failed_orders.append({
                             "code": stock_code,
                             "name": stock_name,
-                            "reason": result.get('msg1', '알 수 없는 오류')
+                            "reason": f"주문 실패: {reason}"
                         })
                 else:
-                    print(f"   ❌ API 호출 실패: {response.status_code}")
+                    reason = f"API 호출 실패: {response.status_code}"
+                    print(f"    ❌ 주문 접수 실패: {reason}")
                     failed_orders.append({
                         "code": stock_code,
                         "name": stock_name,
-                        "reason": f"API 호출 실패: {response.status_code}"
+                        "reason": reason
                     })
                 
-                # 다음 주문 전 잠시 대기 (API 호출 제한 고려)
-                time.sleep(0.5)
+                # API 호출 제한 고려 (초당 4건)
+                time.sleep(0.25) 
                 
             except Exception as e:
-                print(f"   ❌ 오류 발생: {e}")
+                reason = str(e)
+                print(f"    ❌ 주문 중 오류: {reason}")
                 failed_orders.append({
                     "code": stock_code,
                     "name": stock_name,
-                    "reason": str(e)
+                    "reason": reason
                 })
         
+        print(f"--- 1단계 완료 (성공: {len(pending_orders)} / 실패: {len(failed_orders)}) ---\n")
+        
+        # ==========================================================
+        # 2단계: 접수 성공한 주문들의 '체결 확인' 실행
+        # ==========================================================
+        print(f"--- 2단계: {len(pending_orders)}개 주문 체결 확인 시작 ---")
+        
+        success_orders = []
+        total_amount = 0
+        check_tr_id = "VTTC8001R" if "VTT" in tr_id else "TTTC8001R"
+        
+        for idx, order in enumerate(pending_orders, 1):
+            stock_name = order["name"]
+            order_no = order["order_no"]
+            
+            print(f"  [{idx}/{len(pending_orders)}] {stock_name} ({order_no}) 체결 확인 중...")
+            
+            try:
+                # 1. 체결 확인
+                is_filled = _check_order_filled(
+                    access_token, base_url, app_key, app_secret,
+                    account_no, order_no, check_tr_id, max_attempts=30 
+                )
+                
+                if is_filled:
+                    # 2. 체결가 조회
+                    filled_price, filled_qty = _get_filled_price(
+                        access_token, base_url, app_key, app_secret,
+                        account_no, order_no, check_tr_id
+                    )
+                    
+                    if filled_price and filled_qty:
+                        amount = filled_price * filled_qty
+                        total_amount += amount
+                        
+                        success_orders.append({
+                            "code": order["code"],
+                            "name": stock_name,
+                            "order_no": order_no,
+                            "quantity": filled_qty,
+                            "price": filled_price,
+                            "amount": amount
+                        })
+                        print(f"    💰 체결 완료: {filled_price:,}원 x {filled_qty}주 = {amount:,}원")
+                    else:
+                        print(f"    ⚠️ 체결가 조회 실패")
+                        failed_orders.append({
+                            "code": order["code"],
+                            "name": stock_name,
+                            "reason": "체결 완료했으나 체결가 조회 실패"
+                        })
+                else:
+                    print(f"    ⚠️ 체결 확인 실패 (타임아웃)")
+                    failed_orders.append({
+                        "code": order["code"],
+                        "name": stock_name,
+                        "reason": "체결 확인 타임아웃"
+                    })
+            
+            except Exception as e:
+                reason = f"체결 확인 중 오류: {e}"
+                print(f"    ❌ {reason}")
+                failed_orders.append({
+                    "code": order["code"],
+                    "name": stock_name,
+                    "reason": reason
+                })
+
+        print(f"--- 2단계 완료 (체결 성공: {len(success_orders)} / 체결 실패: {len(pending_orders) - len(success_orders)}) ---\n")
+
         # 3. 최종 결과 출력
         print(f"\n{'='*80}")
-        print(f"🎯 바스켓 매수 완료")
+        print(f"🎯 바스켓 매수 최종 완료")
         print(f"{'='*80}")
-        print(f"✅ 성공: {len(success_orders)}/{total_stocks}개 종목")
-        print(f"❌ 실패: {len(failed_orders)}/{total_stocks}개 종목")
+        print(f"✅ 최종 성공: {len(success_orders)}/{total_stocks}개 종목")
+        print(f"❌ 최종 실패: {len(failed_orders)}/{total_stocks}개 종목")
         print(f"💰 총 매수 금액: {total_amount:,}원")
         
         if failed_orders:
-            print(f"\n⚠️  실패한 종목:")
+            print(f"\n⚠️ 실패한 종목:")
             for order in failed_orders:
-                print(f"   - {order['name']} ({order['code']}): {order['reason']}")
+                print(f"   - {order['name']} ({order.get('code', 'N/A')}): {order['reason']}")
         
         # 4. 포지션 정보 저장
         if success_orders:
@@ -602,7 +637,7 @@ def buy_basket_direct(access_token, base_url, app_key, app_secret, account_no,
         }
         
     except Exception as e:
-        print(f"❌ 바스켓 매수 중 오류 발생: {e}")
+        print(f"❌ 바스켓 매수 중 치명적 오류 발생: {e}")
         import traceback
         traceback.print_exc()
         return {"rt_cd": "-1", "msg1": str(e)}
