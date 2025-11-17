@@ -830,7 +830,7 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
         # 조건 4: diff >= 0 and position == "etf" → ETF 매도
         elif diff >= 0 and position == "etf":
             print(f"\n{'='*80}")
-            print(f"⚡ [{timestamp}] [조건 4 충족] diff >= -8 & ETF 보유 → ETF 매도")
+            print(f"⚡ [{timestamp}] [조건 4 충족] diff >= 0 & ETF 보유 → ETF 매도")
             print(f"{'='*80}")
             
             result = sell_etf(
@@ -1068,7 +1068,6 @@ if __name__ == "__main__":
                 # ======================================================
                 print("\n" + "-"*30 + " 7. 토큰 반납 " + "-"*30)
                 main_config_obj.revoke_token()
-
             
             # ======================================================
             # (순서 8) 다음 장 대기
