@@ -284,7 +284,7 @@ class BasketWebSocket:
                 }
                 
                 self.ws.send(json.dumps(unsubscribe_data))
-                time.sleep(0.05)  # 빠르게 해제
+                time.sleep(0.2)  # 빠르게 해제
             
             print(f"✅ 바스켓 {len(self.stock_list)}개 종목 구독 해제 완료!")
             return True
@@ -1068,6 +1068,7 @@ if __name__ == "__main__":
                 # ======================================================
                 print("\n" + "-"*30 + " 7. 토큰 반납 " + "-"*30)
                 main_config_obj.revoke_token()
+
             
             # ======================================================
             # (순서 8) 다음 장 대기
