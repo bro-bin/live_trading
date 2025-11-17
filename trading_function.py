@@ -13,16 +13,18 @@ import traceback
 # 거래 기록 저장
 trade_history = []
 
-# 현재 보유 포지션 정보
+# [수정] 현재 보유 포지션 정보 (basket_details 추가)
+# 이 변수는 get_current_position() 또는 매수/매도 함수에 의해 갱신됩니다.
 current_position = {
     "type": None,  # "etf" or "basket"
-    "buy_price": 0,  # 매수 단가
-    "buy_quantity": 0,  # 매수 수량
+    "buy_price": 0,  # 매수 단가 (ETF)
+    "buy_quantity": 0,  # 매수 수량 (ETF)
     "buy_amount": 0,  # 총 매수 금액
     "buy_time": None,  # 매수 시간
-    "order_no": None  # 주문 번호
+    "order_no": None,  # 주문 번호 (ETF)
+    "basket_details": []  # 바스켓 상세 내역 (List[dict]
+    
 }
-
 
 # ==============================================================================
 # ====================== part 2.유틸리티 함수 (내부함수) =======================
@@ -257,6 +259,7 @@ def _get_filled_price(access_token, base_url, app_key, app_secret,
 # ==============================================================================
 
 ### 1) 삼성그룹 ETF 매수 함수
+### 1) 삼성그룹 ETF 매수 함수
 def buy_etf(access_token, base_url, app_key, app_secret, account_no, tr_id):
 
     global current_position
@@ -264,7 +267,7 @@ def buy_etf(access_token, base_url, app_key, app_secret, account_no, tr_id):
     # ------ 종목, 수량 설정 !!! --------
     stock_code = "102780" 
     stock_name = "KODEX 삼성그룹"
-    quantity = 1  # 1주
+    quantity = 1  # 1주 (주문 수량)
     # ----------------------------------
     print(f"\n{'='*80}")
     print(f"🟢 ETF 매수 주문 시작")
@@ -317,174 +320,371 @@ def buy_etf(access_token, base_url, app_key, app_secret, account_no, tr_id):
                         access_token, base_url, app_key, app_secret,
                         account_no, order_no, check_tr_id
                     )
-                    if filled_price is None:
-                        print("⚠️  체결가 조회 실패 (현재가로 대체)")
-                        filled_price = 0
+                    
+                    # [수정] 체결가/수량 조회가 실패한 경우(None)를 처리합니다.
+                    if filled_price is None or filled_qty is None:
+                        print("⚠️  체결가 조회 실패. (is_filled=True, _get_filled_price=None)")
+                        print("   (참고: 포지션은 업데이트되지 않았으나, 실제 체결되었을 수 있으니 잔고 확인 필요)")
+                        return {"rt_cd": "-1", "msg1": "체결가 조회 실패", "success": False}
                     
                     # 5. 매수 정보 기록
                     buy_time = datetime.now()
-                    buy_amount = filled_price * quantity
+                    buy_amount = filled_price * filled_qty # [수정] quantity -> filled_qty
                     
                     current_position["type"] = "etf"
                     current_position["buy_price"] = filled_price
-                    current_position["buy_quantity"] = quantity
+                    current_position["buy_quantity"] = filled_qty # [수정] quantity -> filled_qty
                     current_position["buy_amount"] = buy_amount
                     current_position["buy_time"] = buy_time
                     current_position["order_no"] = order_no
                     
                     print(f"\n💰 매수 완료!")
                     print(f"   매수 단가: {filled_price:,}원")
-                    print(f"   매수 수량: {quantity}주")
+                    print(f"   매수 수량: {filled_qty}주")
                     print(f"   매수 금액: {buy_amount:,}원")
                     print(f"   매수 시간: {buy_time.strftime('%Y-%m-%d %H:%M:%S')}")
                     
-                    return result
+                    # ==========================================================
+                    #  ✅ [핵심 수정] ✅
+                    #  live_trading.py가 기대하는 딕셔너리 형태로 반환합니다.
+                    # ==========================================================
+                    return {
+                        "rt_cd": "0",
+                        "success": True,
+                        "filled_price": filled_price,
+                        "filled_qty": filled_qty
+                    }
                 else:
                     print("⚠️  체결 확인 실패")
-                    return {"rt_cd": "-1", "msg1": "체결 확인 실패"}
+                    return {"rt_cd": "-1", "msg1": "체결 확인 실패", "success": False}
             else:
                 print(f"❌ 매수 주문 실패: {result.get('msg1')}")
-                return result
+                # [수정] 표준화된 실패 딕셔너리 반환
+                return {"rt_cd": result.get("rt_cd"), "msg1": result.get('msg1'), "success": False}
         else:
             print(f"❌ 매수 주문 API 호출 실패: {response.status_code}")
-            return {"rt_cd": "-1", "msg1": f"API 호출 실패: {response.status_code}"}
+            return {"rt_cd": "-1", "msg1": f"API 호출 실패: {response.status_code}", "success": False}
     
     except Exception as e:
         print(f"❌ 매수 중 오류 발생: {e}")
         import traceback
         traceback.print_exc()
-        return {"rt_cd": "-1", "msg1": str(e)}
+        return {"rt_cd": "-1", "msg1": str(e), "success": False}
 
-### 2) 삼성그룹 ETF 매도 함수
+### 2) 삼성그룹 ETF 매도 함수 (수정본: 5단계 구조 적용, 2/3단계 분리)
 def sell_etf(access_token, base_url, app_key, app_secret, account_no, tr_id):
+    """
+    삼성그룹 ETF 매도 함수
+    [로직 수정] buy_basket_direct와 동일하게 단계별 로직 분리
+    1. 1단계: 주문 접수 (재시도)
+    2. 2단계: 체결 확인 (재시도)
+    2.5단계: 포지션 '즉시' 업데이트 (초기화)
+    3. 3단계: 체결가 조회 (재시도)
+    4. 4단계: 최종 결과 출력
+    5. 5단계: '거래 기록' 저장
+    """
     global current_position, trade_history
     
-    # ------ 종목, 수량 설정 !!! --------
+    # ------ 종목, 수량 설정 (기존 로직 유지) --------
     stock_code = "102780" 
     stock_name = "KODEX 삼성그룹"
     quantity = 1  # 1주
     # ----------------------------------
     
     print(f"\n{'='*80}")
-    print(f"🔴 ETF 매도 주문 시작")
+    print(f"🔴 ETF 매도 주문 시작 (로직: 선-주문, 후-확인, 2.5단계 포지션 업데이트)")
     print(f"   종목: {stock_name} ({stock_code})")
     print(f"   수량: {quantity}주")
     print(f"{'='*80}")
     
     try:
+        # 0단계: 포지션 확인
+        if current_position["type"] != "etf":
+            print("❌ 보유 중인 ETF 포지션이 없습니다.")
+            return {"rt_cd": "-1", "msg1": "ETF 포지션 없음"}
+        
+        # 매수 정보 미리 가져오기 (수익률 계산용)
+        buy_amount = current_position.get("buy_amount", 0)
+        buy_time = current_position.get("buy_time")
+
         cano, acnt_prdt_cd = account_no.split('-')
         
-        # 1. 매도 주문
-        url = f"{base_url}/uapi/domestic-stock/v1/trading/order-cash"
-        headers = {
-            "content-type": "application/json; charset=utf-8",
-            "authorization": f"Bearer {access_token}",
-            "appkey": app_key,
-            "appsecret": app_secret,
-            "tr_id": tr_id
-        }
+        # [신규] 단계별 목록 관리
+        pending_orders = [] # 주문 접수 성공 목록 (1단계 -> 2단계)
+        failed_orders = []  # 주문 접수 실패 목록 (1단계)
+        confirmed_filled_orders = [] # 2단계 (체결 확인) 통과 목록 (2단계 -> 3단계)
+        success_orders = [] # 3단계 (가격 조회)까지 최종 성공 목록
+        price_fetch_failed_orders = [] # 3단계 실패 목록
+
+        # 1단계 재시도 로직을 위한 상수
+        MAX_RETRY_ATTEMPTS = 5
+        RETRY_DELAY_SEC = 1
         
-        body = {
-            "CANO": cano,
-            "ACNT_PRDT_CD": acnt_prdt_cd,
-            "PDNO": stock_code,
-            "ORD_DVSN": "01",  #주문구분코드 (시장가는 01)
-            "ORD_QTY": str(quantity),
-            "ORD_UNPR": "0"  #주문단가 (시장가는 0)
-        }
+        # ==========================================================
+        # 1단계: '매도 주문 접수' 실행
+        # ==========================================================
+        print(f"--- 1단계: 1개 종목 매도 주문 접수 시작 (실패 시 최대 {MAX_RETRY_ATTEMPTS}회 재시도) ---")
         
-        response = requests.post(url, headers=headers, data=json.dumps(body))
-        
-        if response.status_code == 200:
-            result = response.json()
+        is_order_placed = False
+        attempt = 0
+        last_reason = "N/A"
+        order_no = None
+
+        while not is_order_placed and attempt < MAX_RETRY_ATTEMPTS:
+            attempt += 1
+            print(f"   [1/1] {stock_name} ({stock_code}) {quantity}주 매도 시도... (시도 {attempt}/{MAX_RETRY_ATTEMPTS})")
             
-            if result.get("rt_cd") == "0":
-                order_no = result["output"]["ODNO"]
-                print(f"✅ 매도 주문 접수 성공")
-                print(f"   주문번호: {order_no}")
+            try:
+                url = f"{base_url}/uapi/domestic-stock/v1/trading/order-cash"
+                headers = {
+                    "content-type": "application/json; charset=utf-8",
+                    "authorization": f"Bearer {access_token}",
+                    "appkey": app_key,
+                    "appsecret": app_secret,
+                    "tr_id": tr_id
+                }
+                body = {
+                    "CANO": cano,
+                    "ACNT_PRDT_CD": acnt_prdt_cd,
+                    "PDNO": stock_code,
+                    "ORD_DVSN": "01",  # 시장가
+                    "ORD_QTY": str(quantity),
+                    "ORD_UNPR": "0"
+                }
                 
-                # 3. 체결 확인
-                check_tr_id = "VTTC8001R" if "VTT" in tr_id else "TTTC8001R"
+                response = requests.post(url, headers=headers, data=json.dumps(body))
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    if result.get("rt_cd") == "0":
+                        order_no = result["output"]["ODNO"]
+                        print(f"    ✅ 주문 접수 성공 (주문번호: {order_no})")
+                        
+                        # [구조 동일화] pending_orders 리스트에 추가
+                        pending_orders.append({
+                            "code": stock_code,
+                            "name": stock_name,
+                            "quantity": quantity,
+                            "order_no": order_no,
+                            "buy_amount_total": buy_amount, # [추가] 전체 매수금액
+                            "buy_time": buy_time           # [추가] 매수 시간
+                        })
+                        is_order_placed = True
+                    else:
+                        last_reason = result.get('msg1', '알 수 없는 오류')
+                        print(f"    ⚠️ 주문 접수 실패 (API 오류): {last_reason}")
+                else:
+                    last_reason = f"API 호출 실패: {response.status_code}"
+                    print(f"    ⚠️ 주문 접수 실패 (HTTP 오류): {last_reason}")
+            
+            except Exception as e:
+                last_reason = str(e)
+                print(f"    ⚠️ 주문 중 오류 (Exception): {last_reason}")
+            
+            time.sleep(0.3) # API 호출 제한
+            
+            if not is_order_placed and attempt < MAX_RETRY_ATTEMPTS:
+                print(f"    ... {RETRY_DELAY_SEC}초 후 재시도 ...")
+                time.sleep(RETRY_DELAY_SEC)
+        
+        # 1단계 최종 실패 시
+        if not is_order_placed:
+            print(f"    ❌ 최종 주문 접수 실패 (재시도 횟수 초과)")
+            failed_orders.append({
+                "code": stock_code,
+                "name": stock_name,
+                "reason": f"주문 접수 최종 실패: {last_reason}"
+            })
+            print(f"--- 1단계 완료 (성공: 0 / 실패: 1) ---\n")
+            return {"rt_cd": "-1", "msg1": last_reason, "failed_step1_place_order": failed_orders}
+
+        # 1단계 성공 시
+        print(f"--- 1단계 완료 (성공: 1 / 실패: 0) ---\n")
+        time.sleep(3) # 체결 대기
+
+        # ==========================================================
+        # 2단계: '체결 확인' 실행
+        # _check_order_filled 호출
+        # ==========================================================
+        print(f"--- 2단계: {len(pending_orders)}개 주문 체결 확인 시작 ---")
+        
+        check_tr_id = "VTTC8001R" if "VTT" in tr_id else "TTTC8001R"
+        
+        while pending_orders:
+            print(f"\n   ... (현재 {len(pending_orders)}개 주문 체결 확인 필요) ...")
+            
+            order = pending_orders[0] # 어차피 1개
+            print(f"   [확인 시도] {order['name']} ({order['order_no']}) 체결 확인 중...")
+            
+            try:
+                # 1. 체결 확인
                 is_filled = _check_order_filled(
+                    access_token, base_url, app_key, app_secret,
+                    account_no, order["order_no"], check_tr_id, max_attempts=60
+                )
+                
+                if is_filled:
+                    print(f"   \t✅ 체결 확인 완료. 2.5단계 포지션 업데이트로 이동.")
+                    confirmed_filled_orders.append(order)
+                    pending_orders.remove(order) # 성공
+                else:
+                    print(f"   \t⚠️ 체결 확인 타임아웃 (60초). 5초 후 재시도...")
+                    time.sleep(5) # 다음 루프 전 대기
+            
+            except Exception as e:
+                print(f"   \t❌ 체결 확인 중 오류: {e}. 5초 후 재시도...")
+                time.sleep(5) # 예외 발생 시 대기
+
+        print(f"--- 2단계 완료 (체결 확인 성공: {len(confirmed_filled_orders)}건) ---\n")
+
+        # ==========================================================
+        # 2.5단계: 포지션 '즉시' 업데이트 (초기화)
+        # ==========================================================
+        print(f"--- 2.5단계: 포지션 정보 업데이트 (초기화) 시작 ---")
+        
+        if confirmed_filled_orders:
+            current_position["type"] = None
+            current_position["buy_price"] = 0
+            current_position["buy_quantity"] = 0
+            current_position["buy_amount"] = 0
+            current_position["buy_time"] = None
+            current_position["order_no"] = None
+            
+            print("   ✅ 포지션 정보 즉시 초기화 완료 (체결 확인 시점).",current_position["type"])
+        else:
+            print("   ⚠️ 2단계 체결 확인된 주문이 없어 포지션 변경 없음.")
+
+        print(f"--- 2.5단계 완료 ---\n")
+
+
+        # ==========================================================
+        # 3단계: '체결가 조회' 실행
+        # _get_filled_price 호출 (2단계와 분리됨)
+        # ==========================================================
+        print(f"--- 3단계: {len(confirmed_filled_orders)}개 주문 체결가 조회 시작 ---")
+        
+        total_sell_amount = 0
+
+        if confirmed_filled_orders:
+            order = confirmed_filled_orders[0] # 어차피 1개
+            stock_name = order["name"]
+            order_no = order["order_no"]
+            
+            print(f"   [조회 시도] {stock_name} ({order_no}) 체결가 조회...")
+            try:
+                # 3. 체결가 조회
+                filled_price, filled_qty = _get_filled_price(
                     access_token, base_url, app_key, app_secret,
                     account_no, order_no, check_tr_id
                 )
                 
-                if is_filled:
-                    # 4. 체결가 조회
-                    filled_price, filled_qty = _get_filled_price(
-                        access_token, base_url, app_key, app_secret,
-                        account_no, order_no, check_tr_id
-                    )
-                    if filled_price is None:
-                        print("⚠️  체결가 조회 실패 (현재가로 대체)")
-                        filled_price = 0
+                if filled_price and filled_qty:
+                    sell_amount = filled_price * filled_qty
+                    total_sell_amount = sell_amount
                     
-                    # 5. 수익률 계산 및 기록
-                    sell_time = datetime.now()
-                    sell_amount = filled_price * quantity
-                    
-                    # 매수 정보가 있는 경우에만 수익률 계산
-                    if current_position["type"] == "etf" and current_position["buy_amount"] > 0:
-                        buy_amount = current_position["buy_amount"]
-                        buy_time = current_position["buy_time"]
-                        
-                        profit = sell_amount - buy_amount
-                        return_rate = (profit / buy_amount) * 100
-                        
-                        # 거래 기록 저장
-                        trade_record = {
-                            "거래일시": sell_time.strftime('%Y-%m-%d %H:%M:%S'),
-                            "포지션": "ETF",
-                            "매수시간": buy_time.strftime('%Y-%m-%d %H:%M:%S'),
-                            "매도시간": sell_time.strftime('%Y-%m-%d %H:%M:%S'),
-                            "매수금액": buy_amount,
-                            "매도금액": sell_amount,
-                            "손익": profit,
-                            "수익률(%)": round(return_rate, 2)
-                        }
-                        
-                        trade_history.append(trade_record)
-                        
-                        print(f"\n💰 매도 완료 및 수익률 기록!")
-                        print(f"{'='*80}")
-                        print(f"   매도 단가: {filled_price:,}원")
-                        print(f"   매도 수량: {quantity}주")
-                        print(f"   매도 금액: {sell_amount:,}원")
-                        print(f"   매도 시간: {sell_time.strftime('%Y-%m-%d %H:%M:%S')}")
-                        print(f"{'─'*80}")
-                        print(f"   매수 금액: {buy_amount:,}원")
-                        print(f"   손익: {profit:+,}원")
-                        print(f"   수익률: {return_rate:+.2f}%")
-                        print(f"{'='*80}")
-                        
-                        # 포지션 초기화
-                        current_position["type"] = None
-                        current_position["buy_price"] = 0
-                        current_position["buy_quantity"] = 0
-                        current_position["buy_amount"] = 0
-                        current_position["buy_time"] = None
-                        current_position["order_no"] = None
-                    else:
-                        print(f"\n💰 매도 완료!")
-                        print(f"   매도 단가: {filled_price:,}원")
-                        print(f"   매도 수량: {quantity}주")
-                        print(f"   매도 금액: {sell_amount:,}원")
-                        print(f"   ⚠️  매수 정보 없음 (수익률 계산 불가)")
-                    
-                    return result
+                    # 수익률 계산 (백업된 정보 사용)
+                    profit = sell_amount - order["buy_amount_total"]
+                    return_rate = (profit / order["buy_amount_total"]) * 100 if order["buy_amount_total"] > 0 else 0
+
+                    success_orders.append({
+                        "code": order["code"],
+                        "name": stock_name,
+                        "order_no": order_no,
+                        "quantity": filled_qty,
+                        "sell_price": filled_price,
+                        "sell_amount": sell_amount,
+                        "buy_amount": order["buy_amount_total"],
+                        "buy_time": order["buy_time"],
+                        "profit": profit,
+                        "return_rate": return_rate
+                    })
+                    print(f"   \t💰 체결가 조회 완료: {filled_price:,}원 x {filled_qty}주 = {sell_amount:,}원")
+
                 else:
-                    print("⚠️  체결 확인 실패")
-                    return {"rt_cd": "-1", "msg1": "체결 확인 실패"}
-            else:
-                print(f"❌ 매도 주문 실패: {result.get('msg1')}")
-                return result
+                    # 2단계는 통과했으나 3단계 실패
+                    reason = "체결가 조회 실패 (API가 가격/수량 반환 안함)"
+                    print(f"   \t⚠️ {reason}")
+                    price_fetch_failed_orders.append({**order, "reason": reason})
+
+            except Exception as e:
+                reason = f"체결가 조회 중 오류: {e}"
+                print(f"   \t❌ {reason}")
+                price_fetch_failed_orders.append({**order, "reason": reason})
+        
+        print(f"--- 3단계 완료 (최종 성공: {len(success_orders)} / 가격조회 실패: {len(price_fetch_failed_orders)}) ---\n")
+        
+        # ==========================================================
+        # 4. 최종 결과 출력
+        # ==========================================================
+        sell_time = datetime.now()
+        
+        print(f"\n{'='*80}")
+        print(f"🎯 ETF 매도 최종 완료")
+        print(f"{'='*80}")
+
+        if success_orders:
+            # 3단계까지 모두 성공
+            result_data = success_orders[0]
+            print(f"✅ 최종 성공: 1/1개 종목")
+            print(f"💰 매도 금액: {result_data['sell_amount']:,}원")
+            print(f"{'─'*80}")
+            print(f"   매수 금액: {result_data['buy_amount']:,}원")
+            print(f"   총 손익: {result_data['profit']:+,}원")
+            print(f"   수익률: {result_data['return_rate']:+.2f}%")
+        
+        elif failed_orders: 
+            # 1단계 실패
+            print(f"❌ 주문 접수 실패 (1단계): 1/1개 종목")
+            print(f"   - {failed_orders[0]['name']}: {failed_orders[0]['reason']}")
+
+        elif price_fetch_failed_orders: 
+            # 3단계 실패 (2.5단계에서 포지션은 이미 초기화됨)
+            print(f"⚠️ 체결가 조회 실패 (3단계): 1/1개 종목")
+            print(f"   - {price_fetch_failed_orders[0]['name']}: {price_fetch_failed_orders[0]['reason']}")
+            print(f"   - [중요] 체결은 되었으나(2단계 성공) 가격 조회를 실패했습니다.")
+            print(f"   - (참고: 포지션은 2.5단계에서 이미 초기화되었습니다.)")
+        
         else:
-            print(f"❌ 매도 주문 API 호출 실패: {response.status_code}")
-            return {"rt_cd": "-1", "msg1": f"API 호출 실패: {response.status_code}"}
-    
+             # 2단계 체결 확인 실패 (confirmed_filled_orders가 0건)
+             print(f"❌ ETF 매도 실패 (2단계 체결 확인 실패 또는 타임아웃)")
+             print(f"   - (참고: 포지션이 초기화되지 않았을 수 있습니다. 잔고 확인 필요)")
+
+        print(f"{'='*80}\n")
+        
+        # ==========================================================
+        # 5. 거래 기록 저장 
+        # (포지션 초기화는 2.5단계로 이동됨)
+        # ==========================================================
+        
+        if success_orders:
+            result_data = success_orders[0]
+            trade_record = {
+                "거래일시": sell_time.strftime('%Y-%m-%d %H:%M:%S'),
+                "포지션": "ETF",
+                "매수시간": result_data['buy_time'].strftime('%Y-%m-%d %H:%M:%S') if result_data['buy_time'] else "N/A",
+                "매도시간": sell_time.strftime('%Y-%m-%d %H:%M:%S'),
+                "매수금액": result_data['buy_amount'],
+                "매도금액": result_data['sell_amount'],
+                "손익": result_data['profit'],
+                "수익률(%)": round(result_data['return_rate'], 2)
+            }
+            
+            trade_history.append(trade_record)
+            print(f"--- 5단계: 📝 거래 기록 저장 완료 ---\n")
+        else:
+            print(f"--- 5단계: ⚠️ 3단계 최종 성공 건이 없어 거래 기록 저장 생략 ---\n")
+
+        
+        return {
+            "rt_cd": "0" if success_orders else "-1",
+            "success": success_orders,
+            "failed_step1_place_order": failed_orders,
+            "failed_step3_get_price": price_fetch_failed_orders,
+            "total_sell_amount": total_sell_amount
+        }
+        
     except Exception as e:
-        print(f"❌ 매도 중 오류 발생: {e}")
+        print(f"❌ ETF 매도 중 치명적 오류 발생: {e}")
         import traceback
         traceback.print_exc()
         return {"rt_cd": "-1", "msg1": str(e)}
@@ -773,21 +973,22 @@ def buy_basket_direct(access_token, base_url, app_key, app_secret, account_no,
         traceback.print_exc()
         return {"rt_cd": "-1", "msg1": str(e)}
 
-### 4) 바스켓 매도 함수 (수정본: buy_basket_direct와 동일한 단계별 구조 적용)
+### 4) 바스켓 매도 함수 (수정본: 2.5단계 포지션 즉시 초기화 적용)
 def sell_basket(access_token, base_url, app_key, app_secret, account_no, tr_id):
     """
     삼성그룹 바스켓(개별 종목들) 매도 함수
     [로직 수정] buy_basket_direct와 동일하게 단계별 로직 분리
     1. 1단계: 모든 종목의 주문을 '먼저' 접수
     2. 2단계: 접수된 주문들의 체결 여부를 '나중에' 확인
+    2.5단계: 포지션 '즉시' 업데이트 (초기화)  <-- ★★★ 수정된 부분 ★★★
     3. 3단계: 체결 확인된 주문들의 '체결가'를 조회
     4. 4단계: 최종 결과 출력
-    5. 5단계: 거래 기록 및 포지션 초기화
+    5. 5단계: '거래 기록' 저장
     """
     global current_position, trade_history
     
     print(f"\n{'='*80}")
-    print(f"🔴 바스켓 매도 주문 시작 (로직: 선-주문, 후-확인)")
+    print(f"🔴 바스켓 매도 주문 시작 (로직: 선-주문, 후-확인, 2.5단계 포지션 업데이트)")
     print(f"{'='*80}")
     
     try:
@@ -826,7 +1027,6 @@ def sell_basket(access_token, base_url, app_key, app_secret, account_no, tr_id):
 
         # ==========================================================
         # 1단계: 모든 종목에 대해 '매도 주문 접수' 먼저 실행
-        # (buy_basket_direct와 동일한 구조)
         # ==========================================================
         print(f"--- 1단계: {total_stocks}개 종목 매도 주문 접수 시작 (실패 시 최대 {MAX_RETRY_ATTEMPTS}회 재시도) ---")
         
@@ -909,7 +1109,6 @@ def sell_basket(access_token, base_url, app_key, app_secret, account_no, tr_id):
 
         # ==========================================================
         # [신규] 2단계: 접수 성공한 주문들의 '체결 확인' 선-실행
-        # (buy_basket_direct와 동일한 구조)
         # ==========================================================
         print(f"--- 2단계: {len(pending_orders)}개 주문 체결 확인 시작 ---")
         
@@ -933,7 +1132,7 @@ def sell_basket(access_token, base_url, app_key, app_secret, account_no, tr_id):
                     )
                     
                     if is_filled:
-                        print(f"   \t✅ 체결 확인 완료. 가격 조회 대기열로 이동.")
+                        print(f"   \t✅ 체결 확인 완료. 2.5단계 포지션 업데이트로 이동.")
                         confirmed_filled_orders.append(order)
                         pending_orders.remove(order) # 성공했으므로 대기 목록에서 제거
                     else:
@@ -952,15 +1151,31 @@ def sell_basket(access_token, base_url, app_key, app_secret, account_no, tr_id):
         print(f"--- 2단계 완료 (체결 확인 성공: {len(confirmed_filled_orders)}건) ---\n")
         
         # ==========================================================
-        # [신규] 2.5단계: 포지션 '타입' 업데이트
-        # (buy_basket_direct와 동일한 구조 - 매도에서는 큰 의미 없으나 구조적 동일성)
+        # [수정] 2.5단계: 포지션 '즉시' 업데이트 (초기화)
+        # (buy_etf/sell_etf와 동일한 구조)
         # ==========================================================
-        # (매도는 포지션 '청산'이므로, 2.5단계에서 중간 업데이트 대신 5단계에서 최종 초기화)
-        print(f"--- 2.5단계: 포지션 업데이트 (매도 로직에서는 생략. 5단계에서 최종 초기화) ---\n")
+        print(f"--- 2.5단계: 포지션 정보 업데이트 (초기화) 시작 ---")
+        
+        # 2단계(체결)를 통과한 주문이 하나라도 있으면,
+        # 3단계(가격조회) 성공 여부와 관계없이 포지션은 즉시 초기화
+        if confirmed_filled_orders:
+            current_position["type"] = None
+            current_position["buy_price"] = 0
+            current_position["buy_quantity"] = 0
+            current_position["buy_amount"] = 0
+            current_position["buy_time"] = None
+            current_position["order_no"] = None
+            current_position["basket_details"] = []
+            print("   ✅ 포지션 정보 즉시 초기화 완료 (체결 확인 시점).")
+        else:
+            # 1단계에서 주문은 성공했으나, 2단계에서 체결 확인이 하나도 안 된 경우
+            print("   ⚠️ 2단계 체결 확인된 주문이 없어 포지션 변경 없음.")
+            
+        print(f"--- 2.5단계 완료 ---\n")
+
 
         # ==========================================================
         # [신규] 3단계: 체결 완료된 주문들의 '체결가 조회' 후-실행
-        # (buy_basket_direct와 동일한 구조)
         # ==========================================================
         print(f"--- 3단계: {len(confirmed_filled_orders)}개 주문 체결가 조회 시작 ---")
         
@@ -1024,7 +1239,6 @@ def sell_basket(access_token, base_url, app_key, app_secret, account_no, tr_id):
 
         # ==========================================================
         # 4. 최종 결과 출력
-        # (buy_basket_direct와 동일한 구조)
         # ==========================================================
         sell_time = datetime.now()
         total_profit = total_sell_amount - buy_amount
@@ -1036,7 +1250,8 @@ def sell_basket(access_token, base_url, app_key, app_secret, account_no, tr_id):
         
         print(f"✅ 최종 성공: {len(success_orders)}/{total_stocks}개 종목")
         print(f"❌ 주문 접수 실패 (1단계): {len(failed_orders)}/{total_stocks}개 종목")
-        print(f"⚠️ 체결가 조회 실패 (3단계): {len(price_fetch_failed_orders)}/{total_stocks}개 종목 (체결은 되었으나 가격/수량 조회 실패)")
+        print(f"⚠️ 체결가 조회 실패 (3단계): {len(price_fetch_failed_orders)}/{total_stocks}개 종목")
+        print(f"   - (참고: 3단계 실패 종목은 2.5단계에서 포지션이 이미 초기화되었습니다.)")
         print(f"{'─'*80}")
         print(f"💰 매수 금액: {buy_amount:,}원")
         print(f"💰 매도 금액: {total_sell_amount:,}원")
@@ -1049,7 +1264,7 @@ def sell_basket(access_token, base_url, app_key, app_secret, account_no, tr_id):
                 print(f"   - {order['name']} ({order['code']}): {order['reason']}")
         
         if price_fetch_failed_orders:
-            print(f"\n⚠️ 실패한 종목 (3단계 체결가 조회 실패 - [중요] 체결은 되었을 수 있음!):")
+            print(f"\n⚠️ 실패한 종목 (3단계 체결가 조회 실패 - [중요] 체결은 되었음!):")
             for order in price_fetch_failed_orders:
                 print(f"   - {order['name']} ({order['code']}) (주문번호: {order['order_no']}): {order['reason']}")
 
@@ -1061,8 +1276,8 @@ def sell_basket(access_token, base_url, app_key, app_secret, account_no, tr_id):
         print(f"{'='*80}\n")
         
         # ==========================================================
-        # 5. 거래 기록 저장 및 포지션 초기화
-        # (buy_basket_direct와 동일한 구조)
+        # 5. 거래 기록 저장 
+        # (포지션 초기화는 2.5단계로 이동됨)
         # ==========================================================
         
         # 5-1. 거래 기록 저장
@@ -1082,18 +1297,11 @@ def sell_basket(access_token, base_url, app_key, app_secret, account_no, tr_id):
             }
             
             trade_history.append(trade_record)
-            print(f"📝 거래 기록 저장 완료")
+            print(f"--- 5단계: 📝 거래 기록 저장 완료 ---\n")
+        else:
+            print(f"--- 5단계: ⚠️ 3단계 최종 성공 건이 없어 거래 기록 저장 생략 ---\n")
         
-        # 5-2. 포지션 초기화
-        current_position["type"] = None
-        current_position["buy_price"] = 0
-        current_position["buy_quantity"] = 0
-        current_position["buy_amount"] = 0
-        current_position["buy_time"] = None
-        current_position["order_no"] = None
-        current_position["basket_details"] = []
-        
-        print("📝 포지션 정보 초기화 완료\n")
+        # 5-2. 포지션 초기화 (2.5단계로 이동함)
         
         return {
             "rt_cd": "0" if success_orders else "-1",
@@ -1110,6 +1318,7 @@ def sell_basket(access_token, base_url, app_key, app_secret, account_no, tr_id):
         import traceback
         traceback.print_exc()
         return {"rt_cd": "-1", "msg1": str(e)}
+
     
 # ==============================================================================
 # ======================== part 4. 기타 필요 함수 ==============================
@@ -1516,3 +1725,172 @@ def clear_all_stocks(access_token, base_url, app_key, app_secret, account_no, tr
         import traceback
         traceback.print_exc()
         return {"rt_cd": "-1", "msg1": str(e)}
+    
+### 현재 포지션 확인 함수 (live_trading.py에서 이동 및 수정)
+def get_current_position(access_token, base_url, app_key, app_secret, account_no, is_real):
+    """
+    현재 잔고를 조회하여 포지션 상태를 반환
+    [수정]
+    - (1) trading_function.py의 전역 변수 'current_position' 딕셔너리를 업데이트
+    - (2) live_trading.py의 메인 로직을 위해 포지션 상태 문자열(str)을 반환
+    
+    Args:
+        access_token: 접근 토큰
+        base_url: API 기본 URL
+        app_key: 앱 키
+        app_secret: 앱 시크릿
+        account_no: 계좌번호 (예: "50154524-01")
+        is_real: 실전투자 여부 (bool)
+    
+    Returns:
+        str: 포지션 상태 ("none", "basket", "etf")
+    """
+    
+    global current_position # [추가] 전역 변수 사용 선언
+    
+    try:
+        print(f"\n🔍 현재 포지션 확인 중... (global 'current_position' 갱신)")
+        
+        cano, acnt_prdt_cd = account_no.split('-')
+        
+        # 잔고 조회 파라미터
+        params = {
+            "CANO": cano,
+            "ACNT_PRDT_CD": acnt_prdt_cd,
+            "AFHR_FLPR_YN": "N",
+            "OFL_YN": "",
+            "INQR_DVSN": "02",  # 종목별 조회
+            "UNPR_DVSN": "01",
+            "FUND_STTL_ICLD_YN": "N",
+            "FNCG_AMT_AUTO_RDPT_YN": "N",
+            "PRCS_DVSN": "00",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": ""
+        }
+        
+        # REST API 호출
+        url = f"{base_url}/uapi/domestic-stock/v1/trading/inquire-balance"
+        headers = {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {access_token}",
+            "appkey": app_key,
+            "appsecret": app_secret,
+            "tr_id": "VTTC8434R" if not is_real else "TTTC8434R"
+        }
+        
+        response = requests.get(url, headers=headers, params=params)
+        
+        # [수정] 전역 변수 초기화 (기존 상태를 지움)
+        current_position = {
+            "type": None, "buy_price": 0, "buy_quantity": 0, "buy_amount": 0,
+            "buy_time": None, "order_no": None, "basket_details": []
+        }
+        
+        if response.status_code != 200:
+            print(f"❌ 잔고 조회 실패: {response.status_code}")
+            print(f"   응답: {response.text}")
+            current_position["type"] = "none"
+            return "none"
+        
+        result = response.json()
+        
+        if result.get('rt_cd') != '0':
+            print(f"❌ 잔고 조회 오류: {result.get('msg1', 'Unknown error')}")
+            current_position["type"] = "none"
+            return "none"
+        
+        # 보유 종목 리스트
+        holdings = result.get('output1', [])
+        
+        if not holdings or len(holdings) == 0:
+            print("✅ 포지션 없음 (잔고 비어있음)")
+            current_position["type"] = "none"
+            return "none"
+        
+        # 삼성그룹 종목 코드 리스트
+        samsung_codes = [
+            "028050", "006400", "028260", "032830", "018260",
+            "009150", "005930", "010140", "016360", "029780",
+            "000810", "012750", "030000", "008770"
+        ]
+        
+        # ETF 코드
+        etf_code = "102780"
+        
+        # 보유 종목 확인
+        has_etf = False
+        basket_stocks_found = [] # [수정] 바스켓 상세내역 저장
+        
+        for item in holdings:
+            stock_code = item.get('pdno', '')
+            quantity = int(item.get('hldg_qty', 0))
+            stock_name = item.get('prdt_name', stock_code)
+            
+            if quantity > 0:
+                if stock_code == etf_code:
+                    has_etf = True
+                    print(f"  📊 ETF 보유: {stock_code} ({quantity}주)")
+                    
+                    # [추가] 전역 변수 업데이트
+                    current_position["type"] = "etf"
+                    current_position["buy_quantity"] = quantity
+                    # [경고] 알 수 없는 값
+                    current_position["buy_price"] = 0 
+                    current_position["buy_amount"] = 0
+                    current_position["buy_time"] = datetime.now() # 임시로 현재시간
+                    
+                    print("   ⚠️  [경고] ETF 포지션 감지. 'buy_price'/'buy_amount'는 알 수 없으므로 0으로 설정됩니다.")
+                    print("   ⚠️  첫 매도 시 손익 계산이 정확하지 않을 수 있습니다.")
+                    
+                    break # ETF가 1순위
+                
+                elif stock_code in samsung_codes:
+                    print(f"  📦 바스켓 종목: {stock_name} ({quantity}주)")
+                    basket_stocks_found.append({
+                        "code": stock_code,
+                        "name": stock_name,
+                        "quantity": quantity,
+                        "price": 0, # [경고] 매수 단가 알 수 없음
+                        "amount": 0
+                    })
+        
+        # 포지션 판단
+         #1. ETF 우선 체크
+        if has_etf:
+            print("✅ 현재 포지션: ETF 보유 중")
+            return "etf" # current_position은 이미 위에서 set됨
+        
+         #2. 바스켓 체크
+        BASKET_COMPLETE_THRESHOLD = len(samsung_codes)
+        basket_stock_count = len(basket_stocks_found)
+
+        if basket_stock_count >= BASKET_COMPLETE_THRESHOLD:
+            print(f"✅ 현재 포지션: 바스켓 보유 중 ({basket_stock_count}/{len(samsung_codes)}개)")
+            
+            # [추가] 전역 변수 업데이트
+            current_position["type"] = "basket"
+            current_position["basket_details"] = basket_stocks_found
+            current_position["buy_amount"] = 0 # 알 수 없음
+            current_position["buy_time"] = datetime.now() # 임시로 현재시간
+            
+            print("   ⚠️  [경고] 바스켓 포지션 감지. 개별 'buy_price'는 알 수 없으므로 0으로 설정됩니다.")
+            print("   ⚠️  첫 매도 시 손익 계산이 정확하지 않을 수 있습니다.")
+            
+            return "basket"
+        
+         #3. 포지션 없음
+        else:
+            print("✅ 현재 포지션: 없음 (ETF/바스켓 완성 안됨)")
+            current_position["type"] = "none" # 이미 위에서 초기화됨
+            return "none"
+        
+    except Exception as e:
+        print(f"❌ 포지션 확인 중 오류: {e}")
+        traceback.print_exc()
+        
+        # [추가] 오류 발생 시에도 전역 변수 초기화
+        current_position = {
+            "type": "none", "buy_price": 0, "buy_quantity": 0, "buy_amount": 0,
+            "buy_time": None, "order_no": None, "basket_details": []
+        }
+        return "none"

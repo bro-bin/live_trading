@@ -667,121 +667,8 @@ class MonitoringWebSocket:
 # =============================== end =======================================
 # ===========================================================================
 
-from trading_function import buy_etf, sell_etf, buy_basket_direct, sell_basket, clear_all_stocks, save_df_to_csv
+from trading_function import buy_etf, sell_etf, buy_basket_direct, sell_basket, clear_all_stocks, save_df_to_csv, get_current_position
 # __________________________  PART 2: 전략구현  _______________________________
-### 현재 포지션 확인 함수
-def get_current_position(config: KISConfig) -> str:
-    """
-    현재 잔고를 조회하여 포지션 상태를 반환
-    
-    Args:
-        config: KISConfig 객체
-    
-    Returns:
-        str: 포지션 상태
-            - "none": 포지션 없음
-            - "holding_basket": 바스켓 보유 중 (삼성그룹 개별 종목들)
-            - "holding_etf": ETF 보유 중 (KODEX 삼성그룹)
-    """
-    try:
-        print("\n🔍 현재 포지션 확인 중...")
-        
-        # 잔고 조회 파라미터
-        params = {
-            "CANO": config.cano,
-            "ACNT_PRDT_CD": config.acnt_prdt_cd,
-            "AFHR_FLPR_YN": "N",
-            "OFL_YN": "",
-            "INQR_DVSN": "02",  # 종목별 조회
-            "UNPR_DVSN": "01",
-            "FUND_STTL_ICLD_YN": "N",
-            "FNCG_AMT_AUTO_RDPT_YN": "N",
-            "PRCS_DVSN": "00",
-            "CTX_AREA_FK100": "",
-            "CTX_AREA_NK100": ""
-        }
-        
-        # REST API 호출
-        url = f"{config.base_url}/uapi/domestic-stock/v1/trading/inquire-balance"
-        headers = {
-            "content-type": "application/json; charset=utf-8",
-            "authorization": f"Bearer {config.access_token}",
-            "appkey": config.app_key,
-            "appsecret": config.app_secret,
-            "tr_id": "VTTC8434R" if not config.is_real else "TTTC8434R"
-        }
-        
-        response = requests.get(url, headers=headers, params=params)
-        
-        if response.status_code != 200:
-            print(f"❌ 잔고 조회 실패: {response.status_code}")
-            print(f"   응답: {response.text}")
-            return "none"
-        
-        result = response.json()
-        
-        if result.get('rt_cd') != '0':
-            print(f"❌ 잔고 조회 오류: {result.get('msg1', 'Unknown error')}")
-            return "none"
-        
-        # 보유 종목 리스트
-        holdings = result.get('output1', [])
-        
-        if not holdings or len(holdings) == 0:
-            print("✅ 포지션 없음 (잔고 비어있음)")
-            return "none"
-        
-        # 삼성그룹 종목 코드 리스트
-        samsung_codes = [
-            "028050", "006400", "028260", "032830", "018260",
-            "009150", "005930", "010140", "016360", "029780",
-            "000810", "012750", "030000", "008770"
-        ]
-        
-        # ETF 코드
-        etf_code = "102780"
-        
-        # 보유 종목 확인
-        has_etf = False
-        basket_stock_count = 0
-        
-        for item in holdings:
-            stock_code = item.get('pdno', '')
-            quantity = int(item.get('hldg_qty', 0))
-            
-            if quantity > 0:
-                if stock_code == etf_code:
-                    has_etf = True
-                    print(f"  📊 ETF 보유: {stock_code} ({quantity}주)")
-                    break
-                elif stock_code in samsung_codes:
-                    basket_stock_count += 1  # ⬅️ [수정] 바스켓 종목 수 카운트
-                    stock_name = item.get('prdt_name', stock_code)
-                    print(f"  📦 바스켓 종목: {stock_name} ({quantity}주)")
-        
-        # 포지션 판단
-         #1. ETF 우선 체크
-        if has_etf:
-            print("✅ 현재 포지션: ETF 보유 중")
-            return "holding_etf"
-         #2. 바스켓 체크
-        BASKET_COMPLETE_THRESHOLD = len(samsung_codes)
-
-        if basket_stock_count >= BASKET_COMPLETE_THRESHOLD:
-            print(f"✅ 현재 포지션: 바스켓 보유 중 ({basket_stock_count}/{len(samsung_codes)}개)")
-            return "holding_basket"
-        
-         #3. 포지션 없음
-        else:
-            print("✅ 현재 포지션: 없음")
-            return "none"
-        
-    except Exception as e:
-        print(f"❌ 포지션 확인 중 오류: {e}")
-        import traceback
-        traceback.print_exc()
-        return "none"
-
 
 #전역 변수 추가 (for. run_trading_logic함수)
 basket_optimization_counter = 0
@@ -877,8 +764,8 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
                 
                 # ✅ 수정: 성공 종목이 있을 때만 포지션 변경
                 if result.get("rt_cd") == "0" and result.get("success"):
-                    position = "holding_basket"
-                    print(f"\n✅ 포지션 업데이트: none → holding_basket")
+                    position = "basket"
+                    print(f"\n✅ 포지션 업데이트: none → basket")
                     print(f"   성공: {len(result['success'])}개 종목")
                     print(f"   실패: {len(result.get('failed', []))}개 종목")
                 else:
@@ -888,8 +775,8 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
             else:
                 print(f"[{timestamp}] ⚠️  조건 충족하나 바스켓 최적화 대기 중...")
         
-        # 조건 2: diff <= 0 and position == "holding_basket" → 바스켓 매도
-        elif diff <= 0 and position == "holding_basket":
+        # 조건 2: diff <= 0 and position == "basket" → 바스켓 매도
+        elif diff <= 0 and position == "basket":
             print(f"\n{'='*80}")
             print(f"⚡ [{timestamp}] [조건 2 충족] diff <= 0 & 바스켓 보유 → 바스켓 매도")
             print(f"{'='*80}")
@@ -906,7 +793,7 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
             # ✅ 수정: 성공 종목이 있을 때만 포지션 변경
             if result.get("rt_cd") == "0" and result.get("success"):
                 position = "none"
-                print(f"\n✅ 포지션 업데이트: holding_basket → none")
+                print(f"\n✅ 포지션 업데이트: basket → none")
                 print(f"   성공: {len(result['success'])}개 종목")
                 print(f"   실패: {len(result.get('failed', []))}개 종목")
             else:
@@ -930,9 +817,9 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
             )
             
             # ✅ 수정: 체결 완료 확인 후 포지션 변경
-            if result.get("rt_cd") == "0" and result.get("filled"):
-                position = "holding_etf"
-                print(f"\n✅ 포지션 업데이트: none → holding_etf")
+            if result.get("rt_cd") == "0" and result.get("success"):
+                position = "etf"
+                print(f"\n✅ 포지션 업데이트: none → etf")
                 print(f"   체결가: {result['filled_price']:,}원")
                 print(f"   수량: {result['filled_qty']}주")
             else:
@@ -940,10 +827,10 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
             
             print(f"{'='*80}\n")
         
-        # 조건 4: diff >= 0 and position == "holding_etf" → ETF 매도
-        elif diff >= 0 and position == "holding_etf":
+        # 조건 4: diff >= 0 and position == "etf" → ETF 매도
+        elif diff >= 0 and position == "etf":
             print(f"\n{'='*80}")
-            print(f"⚡ [{timestamp}] [조건 4 충족] diff >= 0 & ETF 보유 → ETF 매도")
+            print(f"⚡ [{timestamp}] [조건 4 충족] diff >= -8 & ETF 보유 → ETF 매도")
             print(f"{'='*80}")
             
             result = sell_etf(
@@ -956,14 +843,24 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
             )
             
             # ✅ 수정: 체결 완료 확인 후 포지션 변경
-            if result.get("rt_cd") == "0" and result.get("filled"):
+            if result.get("rt_cd") == "0" and result.get("success"):
                 position = "none"
-                print(f"\n✅ 포지션 업데이트: holding_etf → none")
-                print(f"   체결가: {result['filled_price']:,}원")
-                print(f"   수량: {result['filled_qty']}주")
-                print(f"   손익: {result.get('profit', 0):,}원")
+                print(f"\n✅ 포지션 업데이트: etf → none")
+                try:
+                    success_data = result["success"][0]
+                    print(f"   체결가: {success_data.get('sell_price', 0):,}원")
+                    print(f"   수량: {success_data.get('quantity', 0)}주")
+                    print(f"   손익: {success_data.get('profit', 0):,}원")
+                except IndexError:
+                    print("   ⚠️  매도 성공 응답은 받았으나 상세 내역이 없습니다.")
+                    
             else:
                 print(f"\n⚠️  ETF 매도 실패 - 포지션 유지")
+                # 실패 사유 출력 (디버깅에 도움)
+                if result.get("rt_cd") != "0":
+                    print(f"   사유: {result.get('msg1', '알 수 없는 오류')}")
+                elif not result.get("success"):
+                    print(f"   사유: 3단계 체결가 조회 실패 (price_fetch_failed_orders 확인)")
             
             print(f"{'='*80}\n")
         
@@ -991,7 +888,7 @@ if __name__ == "__main__":
     
     # --- (중요) trading_function에서 save_df_to_csv 임포트 ---
     try:
-        from trading_function import save_df_to_csv
+        from trading_function import save_df_to_csv, get_current_position
     except ImportError:
         print("="*80)
         print("⚠️  [임포트 오류] trading_function.py에 save_df_to_csv 함수가 없거나")
@@ -1098,7 +995,16 @@ if __name__ == "__main__":
 
                 # ✅ 추가: 장 시작 시 포지션 확인 (1회만)
                 print("\n" + "-"*30 + " 2-2. 초기 포지션 확인 " + "-"*30)
-                current_position_type = get_current_position(main_config_obj)
+
+                # [수정] get_current_position 호출 방식 변경
+                current_position_type = get_current_position(
+                    main_config_obj.access_token, 
+                    main_config_obj.base_url, 
+                    main_config_obj.app_key, 
+                    main_config_obj.app_secret, 
+                    main_config_obj.account_no, 
+                    main_config_obj.is_real
+                )
 
                 print("\n" + "-"*30 + " 3. 매매 로직 실행 " + "-"*30)
                 print("   📊 diff 모니터링: 1초마다")
@@ -1183,16 +1089,20 @@ if __name__ == "__main__":
             
             while datetime.now() < next_market_open:
                 wait_seconds = (next_market_open - datetime.now()).total_seconds()
+                
+                # [수정] 시간, 분, '초'까지 계산
                 wait_hours = int(wait_seconds // 3600)
                 wait_minutes = int((wait_seconds % 3600) // 60)
+                wait_sec_display = int(wait_seconds % 60)
                 
-                print(f"   ... 다음 거래 시작까지 약 {wait_hours}시간 {wait_minutes}분 남음", end="\r")
+                # [수정] print 문에 초를 추가하고, 줄이 깨지지 않도록 뒤에 공백 추가
+                print(f"   ... 다음 거래 시작까지 약 {wait_hours}시간 {wait_minutes}분 {wait_sec_display}초 남음   ", end="\r")
                 
-                # 9시 1분 전까지는 1분 단위로 체크
-                if wait_seconds > 60:
-                    time.sleep(60)
-                else:
-                    time.sleep(1)  # 1분 이내로 남으면 1초 단위로 체크
+                # [수정] 1분/1초 단위 체크 로직을 제거하고, 항상 1초마다 체크하도록 변경
+                time.sleep(1)
+
+            # [추가] 루프가 종료된 후, 다음 print가 줄바꿈되도록
+            print()
 
         # --- `while True` 루프 종료 (실행될 일 없음, 예외 발생 시 finally로) ---
 
