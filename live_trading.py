@@ -397,6 +397,9 @@ class MonitoringWebSocket:
         self.config = config
         self.ws = None
         self.is_connected = False
+
+        # 하드코딩 또는 config의 공통 approval_key 사용
+        self.approval_key = "a34f9329-c5ef-47b6-8030-30b9adb7f40c"
         
         # ETF 정보
         self.etf_code = "102780"  # KODEX 삼성그룹
@@ -414,15 +417,19 @@ class MonitoringWebSocket:
         
         print(f"\n🔍 모니터링 웹소켓 초기화")
         print(f"   - 종목: {self.etf_name} ({self.etf_code})")
+        if self.approval_key:
+            print("   - approval_key: (하드코딩 사용)")
+        else:
+            print("   - approval_key: (공통키 사용)")
     
     def connect(self):
         """웹소켓 연결"""
         try:
             print("\n🌐 모니터링 웹소켓 연결 시작...")
             
-            # 1. [수정] 공통 접속키가 있는지 확인
-            if not self.config.ws_approval_key:
-                print("❌ 모니터링 WS: 공통 접속키가 없습니다.")
+            # 1. 허용 키 확인: 하드코드된 approval_key 우선 사용
+            if not self.approval_key:
+                print("❌ 모니터링 WS: 공통 접속키 또는 하드코딩된 approval_key가 없습니다.")
                 return False
             
             # 2. 웹소켓 연결
@@ -465,10 +472,13 @@ class MonitoringWebSocket:
         print("\n📡 ETF 데이터 구독 시작...")
         
         try:
+            # 헤더에 들어갈 approval_key 결정 (하드코딩 우선)
+            approval = self.approval_key if self.approval_key else self.config.ws_approval_key
+
             # 1. NAV 구독
             nav_subscribe = {
                 "header": {
-                    "approval_key": self.config.ws_approval_key,
+                    "approval_key": approval,
                     "custtype": "P",
                     "tr_type": "1",
                     "content-type": "utf-8"
@@ -518,10 +528,12 @@ class MonitoringWebSocket:
         print("\n📡 ETF 데이터 구독 해제 중...")
         
         try:
+            approval = self.approval_key if self.approval_key else self.config.ws_approval_key
+
             # 1. NAV 구독 해제
             nav_unsubscribe = {
                 "header": {
-                    "approval_key": self.config.ws_approval_key,
+                    "approval_key": approval,
                     "custtype": "P",
                     "tr_type": "2",  # ✅ "1"(구독) → "2"(해제)
                     "content-type": "utf-8"

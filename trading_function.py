@@ -60,18 +60,19 @@ def _check_order_filled(access_token, base_url, app_key, app_secret,
             params = {
                 "CANO": cano,
                 "ACNT_PRDT_CD": acnt_prdt_cd,
-                # "CTX_AREA_FK100": "",
-                # "CTX_AREA_NK100": "",
-                # "INQR_DVSN_1": "0",  # 전체
-                # "INQR_DVSN_2": "0"   # 전체
-                # 필수 조회 기간 추가
                 "INQR_STRT_DT": datetime.now().strftime("%Y%m%d"),
                 "INQR_END_DT": datetime.now().strftime("%Y%m%d"),
-                # 추가 필드(문서 확인 필요: 필요 시 값 조정)
+                "SLL_BUY_DVSN_CD": "00",  # 00: 전체, 01: 매도, 02: 매수
+                "INQR_DVSN": "00",        # <-- ★★★ 이 줄이 오류를 해결합니다 ★★★
+                "PDNO": "",               # <-- (추가) 종목번호 (전체)
+                "CCLD_DVSN": "00",        # <-- (추가) 체결구분 (전체)
+                "ORD_GNO_BRNO": "",       # <-- (추가) 주문그룹번호
+                "ODNO": "",               # <-- (추가) 주문번호 (전체 미체결 조회를 위해 비워둠)
+                "INQR_DVSN_1": "0",       # 0: 전체, 1: 현금, 2: 융자
+                "INQR_DVSN_2": "0",       # 0: 전체, 1: 미체결, 2: 체결, 3: 확인, 4: 거부, 5: 정정...
+                "INQR_DVSN_3": "00",
                 "CTX_AREA_FK100": "",
-                "CTX_AREA_NK100": "",
-                "INQR_DVSN_1": "0",  # 전체
-                "INQR_DVSN_2": "0"   # 전체
+                "CTX_AREA_NK100": ""
             }
             # 디버그: 보낸 파라미터 출력
             print(f"DEBUG: _check_order_filled params={params}")
