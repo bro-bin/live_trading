@@ -126,7 +126,7 @@ def _check_order_filled(access_token, base_url, app_key, app_secret,
 ### 체결가 조회 함수 (수정본: 내부 재시도 로직 및 상세 로그 추가)
 def _get_filled_price(access_token, base_url, app_key, app_secret, 
                       account_no, order_no, tr_id, 
-                      max_attempts=5, delay_sec=2): # <-- 추가: 5회 * 2초 = 최대 10초간 내부 재시도
+                      max_attempts=10, delay_sec=2.5): # <-- 추가: 5회 * 2초 = 최대 10초간 내부 재시도
     """
     주문번호로 실제 체결가를 조회하는 함수 (데이터 전파 지연을 고려한 내부 재시도 로직 추가)
     
@@ -519,7 +519,6 @@ def buy_etf(access_token, base_url, app_key, app_secret, account_no, tr_id):
         # ==========================================================
         # 5. 포지션 정보 저장 (가격/수량 갱신)
         # ==========================================================
-        
         if success_orders:
             # 3단계 성공 시, 2.5단계에서 저장한 포지션에 가격/수량/금액 갱신
             result_data = success_orders[0]
@@ -566,6 +565,7 @@ def buy_etf(access_token, base_url, app_key, app_secret, account_no, tr_id):
         import traceback
         traceback.print_exc()
         return {"rt_cd": "-1", "msg1": str(e), "success": False}
+    
 ### 2) 삼성그룹 ETF 매도 함수 (수정본: 5단계 구조 적용, 2/3단계 분리)
 def sell_etf(access_token, base_url, app_key, app_secret, account_no, tr_id):
     """
@@ -596,7 +596,7 @@ def sell_etf(access_token, base_url, app_key, app_secret, account_no, tr_id):
         # 0단계: 포지션 확인
         if current_position["type"] != "etf":
             print("❌ 보유 중인 ETF 포지션이 없습니다.")
-            return {"rt_cd": "-1", "msg1": "ETF 포지션 없음"}
+            return {"rt_cd": "-1", "msg1": "이미 포지션 보유 중", "success": False}
         
         # 매수 정보 미리 가져오기 (수익률 계산용)
         buy_amount = current_position.get("buy_amount", 0)
@@ -691,7 +691,7 @@ def sell_etf(access_token, base_url, app_key, app_secret, account_no, tr_id):
                 "reason": f"주문 접수 최종 실패: {last_reason}"
             })
             print(f"--- 1단계 완료 (성공: 0 / 실패: 1) ---\n")
-            return {"rt_cd": "-1", "msg1": last_reason, "failed_step1_place_order": failed_orders}
+            return {"rt_cd": "-1", "msg1": last_reason, "success": False}
 
         # 1단계 성공 시
         print(f"--- 1단계 완료 (성공: 1 / 실패: 0) ---\n")
@@ -743,6 +743,7 @@ def sell_etf(access_token, base_url, app_key, app_secret, account_no, tr_id):
             print("   ✅ 포지션 정보 즉시 초기화 완료 (체결 확인 시점).", current_position["type"])
         else:
             print("   ⚠️ 2단계 체결 확인된 주문이 없어 포지션 변경 없음.")
+            return {"rt_cd": "-1", "msg1": "체결 확인 실패 (2단계)", "success": False}
 
         print(f"--- 2.5단계 완료 ---\n")
 
@@ -845,12 +846,14 @@ def sell_etf(access_token, base_url, app_key, app_secret, account_no, tr_id):
         # 5. 거래 기록 저장 
         # (포지션 초기화는 2.5단계로 이동됨)
         # ==========================================================
-        
         if success_orders:
+            # === [Scenario 1: Step 3 Success] ===
             result_data = success_orders[0]
+            
+            # 5-1. Save History
             trade_record = {
                 "거래일시": sell_time.strftime('%Y-%m-%d %H:%M:%S'),
-                "포지션": "etf",
+                "포지션": "ETF",
                 "매수시간": result_data['buy_time'].strftime('%Y-%m-%d %H:%M:%S') if result_data['buy_time'] else "N/A",
                 "매도시간": sell_time.strftime('%Y-%m-%d %H:%M:%S'),
                 "매수금액": result_data['buy_amount'],
@@ -858,26 +861,62 @@ def sell_etf(access_token, base_url, app_key, app_secret, account_no, tr_id):
                 "손익": result_data['profit'],
                 "수익률(%)": round(result_data['return_rate'], 2)
             }
-            
             trade_history.append(trade_record)
             print(f"--- 5단계: 📝 거래 기록 저장 완료 ---\n")
-        else:
-            print(f"--- 5단계: ⚠️ 3단계 최종 성공 건이 없어 거래 기록 저장 생략 ---\n")
+            
+            # 5-2. Return (Simple Success)
+            return {
+                "rt_cd": "0",
+                "success": True,
+                "sell_price": result_data['sell_price'],
+                "sell_qty": result_data['quantity'],
+                "sell_amount": result_data['sell_amount'],
+                "profit": result_data['profit'],
+                "return_rate": result_data['return_rate']
+            }
 
-        
-        return {
-            "rt_cd": "0" if success_orders else "-1",
-            "success": success_orders,
-            "failed_step1_place_order": failed_orders,
-            "failed_step3_get_price": price_fetch_failed_orders,
-            "total_sell_amount": total_sell_amount
-        }
+        elif price_fetch_failed_orders:
+            # === [Scenario 2: Step 3 Fail, but Step 2 Success] ===
+            # [사용자 요청]
+            result_data = price_fetch_failed_orders[0] # 2단계 통과 정보 (매수 시간/금액 포함)
+
+            # 5-1. Save History (Partial)
+            trade_record = {
+                "거래일시": sell_time.strftime('%Y-%m-%d %H:%M:%S'),
+                "포지션": "ETF",
+                "매수시간": result_data['buy_time'].strftime('%Y-%m-%d %H:%M:%S') if result_data.get('buy_time') else "N/A",
+                "매도시간": sell_time.strftime('%Y-%m-%d %H:%M:%S'),
+                "매수금액": result_data.get('buy_amount_total', 0), # 1단계에서 저장한 매수금액
+                "매도금액": 0, # 알 수 없음
+                "손익": 0, # 알 수 없음
+                "수익률(%)": 0.0,
+                "비고": "3단계(가격조회) 실패" # [개선] 실패 기록
+            }
+            trade_history.append(trade_record)
+            print(f"--- 5단계: 📝 (불완전) 거래 기록 저장 완료 (가격 조회 실패) ---\n")
+            
+            # 5-2. Return (Partial Success)
+            return {
+                "rt_cd": "0",  # 체결(2단계)은 성공했으므로 rt_cd는 "0"
+                "success": True,
+                "msg1": "체결가 조회 실패 (3단계)",
+                "sell_price": 0,
+                "sell_qty": 0,
+                "sell_amount": 0,
+                "profit": 0, 
+                "return_rate": 0
+            }
+            
+        else:
+            # 1, 2단계 실패는 이미 위에서 return 처리됨
+            print(f"--- 5단계: ⚠️ 알 수 없는 오류로 포지션 갱신 실패 ---\n")
+            return {"rt_cd": "-1", "msg1": "알 수 없는 오류 (5단계)", "success": False}
         
     except Exception as e:
         print(f"❌ ETF 매도 중 치명적 오류 발생: {e}")
         import traceback
         traceback.print_exc()
-        return {"rt_cd": "-1", "msg1": str(e)}
+        return {"rt_cd": "-1", "msg1": str(e), "success": False} # [수정] success 키 추가
 
 ### 3) 바스켓 매수 함수 (수정본: 주문과 체결 확인 분리)
 def buy_basket_direct(access_token, base_url, app_key, app_secret, account_no,
@@ -1098,7 +1137,7 @@ def buy_basket_direct(access_token, base_url, app_key, app_secret, account_no,
                 print(f"   \t❌ {reason}")
                 price_fetch_failed_orders.append({**order, "reason": reason})
             
-            time.sleep(0.3) # 가격 조회도 API 호출이므로 딜레이
+            time.sleep(0.5) # 가격 조회도 API 호출이므로 딜레이
 
         print(f"--- 3단계 완료 (최종 성공: {len(success_orders)} / 가격조회 실패: {len(price_fetch_failed_orders)}) ---\n")
 
@@ -1421,7 +1460,7 @@ def sell_basket(access_token, base_url, app_key, app_secret, account_no, tr_id):
                 print(f"   \t❌ {reason}")
                 price_fetch_failed_orders.append({**order, "reason": reason})
             
-            time.sleep(0.3) # 가격 조회도 API 호출이므로 딜레이
+            time.sleep(0.5) # 가격 조회도 API 호출이므로 딜레이
 
         print(f"--- 3단계 완료 (최종 성공: {len(success_orders)} / 가격조회 실패: {len(price_fetch_failed_orders)}) ---\n")
 

@@ -743,11 +743,11 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
         
         # STEP 5: 매매 조건 체크 및 실행
         
-        # 조건 1: diff >= +2 and position == "none" → 바스켓 매수
-        if diff >= 2 and position == "none":
+        # 조건 1: diff >= -6 and position == "none" → 바스켓 매수
+        if diff >= -6 and position == "none":
             if cached_basket_quantities is not None:
                 print(f"\n{'='*80}")
-                print(f"⚡ [{timestamp}] [조건 1 충족] diff >= -5 & 포지션 없음 → 바스켓 매수")
+                print(f"⚡ [{timestamp}] [조건 1 충족] diff >= -6 & 포지션 없음 → 바스켓 매수")
                 print(f"{'='*80}")
                 
                 live_basket_prices = basket_ws.get_current_prices()
@@ -775,10 +775,10 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
             else:
                 print(f"[{timestamp}] ⚠️  조건 충족하나 바스켓 최적화 대기 중...")
         
-        # 조건 2: diff <= 0 and position == "basket" → 바스켓 매도
-        elif diff <= 0 and position == "basket":
+        # 조건 2: diff <= -8 and position == "basket" → 바스켓 매도
+        elif diff <= -8 and position == "basket":
             print(f"\n{'='*80}")
-            print(f"⚡ [{timestamp}] [조건 2 충족] diff <= 0 & 바스켓 보유 → 바스켓 매도")
+            print(f"⚡ [{timestamp}] [조건 2 충족] diff <= -8 & 바스켓 보유 → 바스켓 매도")
             print(f"{'='*80}")
             
             result = sell_basket(
@@ -801,10 +801,10 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
             
             print(f"{'='*80}\n")
         
-        # 조건 3: diff <= -2 and position == "none" → ETF 매수
-        elif diff <= -2 and position == "none":
+        # 조건 3: diff <= -10 and position == "none" → ETF 매수
+        elif diff <= -10 and position == "none":
             print(f"\n{'='*80}")
-            print(f"⚡ [{timestamp}] [조건 3 충족] diff <= -2 & 포지션 없음 → ETF 매수")
+            print(f"⚡ [{timestamp}] [조건 3 충족] diff <= -10 & 포지션 없음 → ETF 매수")
             print(f"{'='*80}")
             
             result = buy_etf(
@@ -827,10 +827,10 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
             
             print(f"{'='*80}\n")
         
-        # 조건 4: diff >= 0 and position == "etf" → ETF 매도
-        elif diff >= 0 and position == "etf":
+        # 조건 4: diff >= -8 and position == "etf" → ETF 매도
+        elif diff >= -8 and position == "etf":
             print(f"\n{'='*80}")
-            print(f"⚡ [{timestamp}] [조건 4 충족] diff >= 0 & ETF 보유 → ETF 매도")
+            print(f"⚡ [{timestamp}] [조건 4 충족] diff >= -8 & ETF 보유 → ETF 매도")
             print(f"{'='*80}")
             
             result = sell_etf(
@@ -847,13 +847,15 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
                 position = "none"
                 print(f"\n✅ 포지션 업데이트: etf → none")
                 try:
-                    success_data = result["success"][0]
-                    print(f"   체결가: {success_data.get('sell_price', 0):,}원")
-                    print(f"   수량: {success_data.get('quantity', 0)}주")
-                    print(f"   손익: {success_data.get('profit', 0):,}원")
+                    # success_data = result["success"][0]
+                    # print(f"   체결가: {success_data.get('sell_price', 0):,}원")
+                    # print(f"   수량: {success_data.get('quantity', 0)}주")
+                    # print(f"   손익: {success_data.get('profit', 0):,}원")
+                    print(f"   체결가: {result.get('sell_price', 0):,}원")
+                    print(f"   수량: {result.get('sell_qty', 0)}주") 
+                    print(f"   손익: {result.get('profit', 0):,}원")
                 except IndexError:
-                    print("   ⚠️  매도 성공 응답은 받았으나 상세 내역이 없습니다.")
-                    
+                    print(f"   ⚠️  매도 성공 응답(결과)을 처리하는 중 오류: {e}")
             else:
                 print(f"\n⚠️  ETF 매도 실패 - 포지션 유지")
                 # 실패 사유 출력 (디버깅에 도움)
@@ -1061,7 +1063,7 @@ if __name__ == "__main__":
                 # 6. (순서 6) CSV 저장
                 # ======================================================
                 print("\n" + "-"*30 + " 6. CSV 저장 " + "-"*30)
-                save_df_to_csv(filename=f"trade_history_{datetime.now().strftime('%Y%m%d')}.csv")
+                save_df_to_csv(filename=f"trade_history_{datetime.now().strftime('%Y%m%d_%H%M')}.csv")
 
                 # ======================================================
                 # 7. (순서 7) 토큰 반납
@@ -1109,6 +1111,9 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n\n🛑 사용자에 의해 프로그램이 중지되었습니다. (Ctrl+C)")
         print("   잠시만 기다려주세요. 리소스를 정리하고 있습니다...")
+
+        save_df_to_csv(filename=f"trade_history_{datetime.now().strftime('%Y%m%d_%H%M')}.csv")
+        print("   csv 저장완료 파일이름 :", f"trade_history_{datetime.now().strftime('%Y%m%d_%H%M')}.csv")
         
         # ✅ 추가: 즉시 구독 해제 (finally 블록 전에)
         if main_basket_ws_obj and main_basket_ws_obj.is_connected:
