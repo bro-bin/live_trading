@@ -77,8 +77,6 @@ def _check_order_filled(access_token, base_url, app_key, app_secret,
                 "CTX_AREA_FK100": "",
                 "CTX_AREA_NK100": ""
             }
-            # 디버그: 보낸 파라미터 출력
-            # print(f"DEBUG: _check_order_filled params={params}")
 
             response = requests.get(url, headers=headers, params=params)
             
@@ -126,7 +124,7 @@ def _check_order_filled(access_token, base_url, app_key, app_secret,
 ### 체결가 조회 함수 (수정본: 내부 재시도 로직 및 상세 로그 추가)
 def _get_filled_price(access_token, base_url, app_key, app_secret, 
                       account_no, order_no, tr_id, 
-                      max_attempts=10, delay_sec=2.5): # <-- 추가: 5회 * 2초 = 최대 10초간 내부 재시도
+                      max_attempts=10, delay_sec=3): # <-- 추가: 5회 * 2초 = 최대 10초간 내부 재시도
     """
     주문번호로 실제 체결가를 조회하는 함수 (데이터 전파 지연을 고려한 내부 재시도 로직 추가)
     
@@ -1402,67 +1400,89 @@ def sell_basket(access_token, base_url, app_key, app_secret, account_no, tr_id):
 
 
         # ==========================================================
-        # [신규] 3단계: 체결 완료된 주문들의 '체결가 조회' 후-실행
+        # [수정] 3단계: 체결가 조회 (수량 일치할 때까지 무한 재시도)
         # ==========================================================
-        print(f"--- 3단계: {len(confirmed_filled_orders)}개 주문 체결가 조회 시작 ---")
+        print(f"--- 3단계: {len(confirmed_filled_orders)}개 주문 체결가 조회 시작 (수량 일치할 때까지 재시도) ---")
         
         success_orders = [] # 3단계 (가격 조회)까지 최종 성공 목록
-        price_fetch_failed_orders = [] # 2단계는 통과했으나 3단계(가격 조회) 실패 목록
+        # [수정] price_fetch_failed_orders 리스트는 이제 사용되지 않습니다. (무한 재시도하므로)
+        # price_fetch_failed_orders = [] 
         total_sell_amount = 0
         
-        for order in confirmed_filled_orders:
-            stock_name = order["name"]
-            order_no = order["order_no"]
-            buy_price = order["buy_price"]
-            original_quantity = order["quantity"] # 매도 주문 수량
+        # [수정] for-loop -> while-loop (2단계와 동일한 구조)
+        while confirmed_filled_orders:
+            print(f"\n   ... (현재 {len(confirmed_filled_orders)}개 주문 체결가/수량 확인 필요) ...")
             
-            print(f"   [조회 시도] {stock_name} ({order_no}) 체결가 조회...")
-            try:
-                filled_price, filled_qty = _get_filled_price(
-                    access_token, base_url, app_key, app_secret,
-                    account_no, order_no, check_tr_id
-                )
+            for order in confirmed_filled_orders.copy():
+                stock_name = order["name"]
+                order_no = order["order_no"]
+                buy_price = order["buy_price"]
+                original_quantity = order["quantity"] # 매도 주문 수량
                 
-                if filled_price and filled_qty:
-                    if filled_qty != original_quantity:
-                        print(f"    ⚠️ 경고: 주문 수량({original_quantity})과 체결 수량({filled_qty})이 다름")
+                print(f"   [조회 시도] {stock_name} ({order_no}) 체결가/수량 확인...")
+                try:
+                    # 1. _get_filled_price 호출 (내부 30초 재시도)
+                    filled_price, filled_qty = _get_filled_price(
+                        access_token, base_url, app_key, app_secret,
+                        account_no, order_no, check_tr_id
+                    )
                     
-                    sell_amount = filled_price * filled_qty
-                    total_sell_amount += sell_amount
-                    
-                    # 개별 종목 손익
-                    stock_buy_amount = buy_price * original_quantity # 매수금액 = 매수가 * 매수수량(==매도주문수량)
-                    stock_profit = sell_amount - stock_buy_amount
-                    stock_return = (stock_profit / stock_buy_amount) * 100 if stock_buy_amount > 0 else 0
-                    
-                    success_orders.append({
-                        "code": order["code"],
-                        "name": stock_name,
-                        "order_no": order_no,
-                        "quantity": filled_qty,
-                        "buy_price": buy_price,
-                        "sell_price": filled_price,
-                        "amount": sell_amount,
-                        "profit": stock_profit,
-                        "return_rate": stock_return
-                    })
-                    
-                    print(f"    💰 체결가 조회 완료: {filled_price:,}원 x {filled_qty}주 = {sell_amount:,}원")
-                    print(f"    📊 종목 손익: {stock_profit:+,}원 ({stock_return:+.2f}%)")
+                    # 2. 결과 분기
+                    if filled_price and filled_qty:
+                        # 2A. [사용자 요청] 수량이 일치하는지 확인
+                        if filled_qty != original_quantity:
+                            print(f"    ⚠️  [데이터 지연] 수량 불일치. (주문: {original_quantity}, 체결 보고: {filled_qty})")
+                            print(f"    ... 5초 후 이 종목({stock_name})을 재조회합니다 ...")
+                            # (order를 confirmed_filled_orders에서 제거하지 않음)
+                        
+                        else:
+                            # 2B. ★ 최종 성공 ★ (수량 일치)
+                            sell_amount = filled_price * filled_qty
+                            total_sell_amount += sell_amount
+                            
+                            # 개별 종목 손익
+                            stock_buy_amount = buy_price * original_quantity # 매수금액 = 매수가 * 매수수량(==매도주문수량)
+                            stock_profit = sell_amount - stock_buy_amount
+                            stock_return = (stock_profit / stock_buy_amount) * 100 if stock_buy_amount > 0 else 0
+                            
+                            success_orders.append({
+                                "code": order["code"],
+                                "name": stock_name,
+                                "order_no": order_no,
+                                "quantity": filled_qty,
+                                "buy_price": buy_price,
+                                "sell_price": filled_price,
+                                "amount": sell_amount,
+                                "profit": stock_profit,
+                                "return_rate": stock_return
+                            })
+                            
+                            print(f"    💰 체결가/수량 일치 확인: {filled_price:,}원 x {filled_qty}주 = {sell_amount:,}원")
+                            print(f"    📊 종목 손익: {stock_profit:+,}원 ({stock_return:+.2f}%)")
 
-                else:
-                    reason = "체결가 조회 실패 (API가 가격/수량 반환 안함)"
-                    print(f"   \t⚠️ {reason}")
-                    price_fetch_failed_orders.append({**order, "reason": reason})
+                            # 성공했으므로 대기 목록에서 제거
+                            confirmed_filled_orders.remove(order) 
+                    
+                    else:
+                        # 2C. _get_filled_price가 30초 후에도 (None, None) 반환
+                        print(f"    ⚠️  [데이터 지연] 30초간 체결가 조회 실패 (API가 가격/수량 반환 안함)")
+                        print(f"    ... 5초 후 이 종목({stock_name})을 재조회합니다 ...")
+                        # (order를 confirmed_filled_orders에서 제거하지 않음)
 
-            except Exception as e:
-                reason = f"체결가 조회 중 오류: {e}"
-                print(f"   \t❌ {reason}")
-                price_fetch_failed_orders.append({**order, "reason": reason})
-            
-            time.sleep(0.5) # 가격 조회도 API 호출이므로 딜레이
+                except Exception as e:
+                    reason = f"체결가 조회 중 오류: {e}"
+                    print(f"   \t❌ {reason}. 5초 후 재시도...")
+                    time.sleep(5) # 예외 발생 시 잠시 대기
+                
+                time.sleep(0.5) # API 호출 제한 (0.5초)
 
-        print(f"--- 3단계 완료 (최종 성공: {len(success_orders)} / 가격조회 실패: {len(price_fetch_failed_orders)}) ---\n")
+            # for-loop(copy)가 끝난 후, 아직 confirmed_filled_orders에 남은 항목이 있다면 5초 대기
+            if confirmed_filled_orders:
+                print(f"   ... (미확인 {len(confirmed_filled_orders)}건) 5초 후 전체 재조회 시작 ...")
+                time.sleep(5)
+        
+        # [수정] while-loop 종료 (모든 주문이 success_orders로 이동함)
+        print(f"--- 3단계 완료 (최종 성공: {len(success_orders)} / 가격조회 실패: 0) ---\n")
 
         # ==========================================================
         # 4. 최종 결과 출력
@@ -1477,7 +1497,6 @@ def sell_basket(access_token, base_url, app_key, app_secret, account_no, tr_id):
         
         print(f"✅ 최종 성공: {len(success_orders)}/{total_stocks}개 종목")
         print(f"❌ 주문 접수 실패 (1단계): {len(failed_orders)}/{total_stocks}개 종목")
-        print(f"⚠️ 체결가 조회 실패 (3단계): {len(price_fetch_failed_orders)}/{total_stocks}개 종목")
         print(f"   - (참고: 3단계 실패 종목은 2.5단계에서 포지션이 이미 초기화되었습니다.)")
         print(f"{'─'*80}")
         print(f"💰 매수 금액: {buy_amount:,}원")
@@ -1490,11 +1509,6 @@ def sell_basket(access_token, base_url, app_key, app_secret, account_no, tr_id):
             for order in failed_orders:
                 print(f"   - {order['name']} ({order['code']}): {order['reason']}")
         
-        if price_fetch_failed_orders:
-            print(f"\n⚠️ 실패한 종목 (3단계 체결가 조회 실패 - [중요] 체결은 되었음!):")
-            for order in price_fetch_failed_orders:
-                print(f"   - {order['name']} ({order['code']}) (주문번호: {order['order_no']}): {order['reason']}")
-
         if success_orders:
             print(f"\n📋 종목별 수익률:")
             for order in success_orders:
@@ -1508,7 +1522,7 @@ def sell_basket(access_token, base_url, app_key, app_secret, account_no, tr_id):
         # ==========================================================
         
         # 5-1. 거래 기록 저장
-        if success_orders or price_fetch_failed_orders: # 2단계(체결)를 통과한 것이 하나라도 있으면 기록
+        if success_orders: # 2단계(체결)를 통과한 것이 하나라도 있으면 기록
             trade_record = {
                 "거래일시": sell_time.strftime('%Y-%m-%d %H:%M:%S'),
                 "포지션": "바스켓",
@@ -1520,8 +1534,29 @@ def sell_basket(access_token, base_url, app_key, app_secret, account_no, tr_id):
                 "수익률(%)": round(total_return_rate, 2),
                 "성공종목수": len(success_orders),
                 "1단계실패종목수": len(failed_orders),
-                "3단계실패종목수": len(price_fetch_failed_orders) # [추가]
+                "3단계실패종목수": 0 
             }
+
+            # ----------------------------------------------------
+            # [신규] 5-1. 종목별 손익/수익률을 trade_record에 추가 (CSV 컬럼용)
+            # ----------------------------------------------------
+            # (SAMSUNG_STOCKS는 파일 상단에서 import 되어 있어야 합니다)
+            
+            # 1. 모든 종목의 손익/수익률 컬럼을 0 (기본값)으로 초기화
+            for stock_name in SAMSUNG_STOCKS.values():
+                trade_record[f"{stock_name}_손익"] = 0
+                trade_record[f"{stock_name}_수익률(%)"] = 0.0
+
+            # 2. 3단계 성공(success_orders) 리스트에서 실제 손익/수익률 업데이트
+            for order in success_orders:
+                stock_name = order.get('name')
+                if stock_name in SAMSUNG_STOCKS.values():
+                    trade_record[f"{stock_name}_손익"] = order.get('profit', 0)
+                    trade_record[f"{stock_name}_수익률(%)"] = round(order.get('return_rate', 0.0), 2)
+            
+            # 3. (참고) 3단계 가격조회 실패(price_fetch_failed_orders) 종목은
+            #    손익/수익률 계산이 불가능하므로 위에서 설정한 초기값 0으로 유지됩니다.
+            # ----------------------------------------------------
             
             trade_history.append(trade_record)
             print(f"--- 5단계: 📝 거래 기록 저장 완료 ---\n")
@@ -1534,7 +1569,6 @@ def sell_basket(access_token, base_url, app_key, app_secret, account_no, tr_id):
             "rt_cd": "0" if success_orders else "-1",
             "success": success_orders,
             "failed_step1_place_order": failed_orders,
-            "failed_step3_get_price": price_fetch_failed_orders,
             "total_sell_amount": total_sell_amount,
             "total_profit": total_profit,
             "total_return_rate": total_return_rate
@@ -1907,6 +1941,74 @@ def clear_all_stocks(access_token, base_url, app_key, app_secret, account_no, tr
                 time.sleep(5)
 
         print(f"--- 2단계 완료 (체결 확인 성공: {len(success_orders)}건) ---\n")
+
+        # ==========================================================
+        # [신규] 4.5. 거래 기록 저장 (CSV용)
+        # ==========================================================
+        sell_time = datetime.now()
+        
+        # 1. 매수 정보 가져오기 (6단계 포지션 초기화 전)
+        buy_amount = current_position.get("buy_amount", 0)
+        buy_time_obj = current_position.get("buy_time")
+        buy_time_str = buy_time_obj.strftime('%Y-%m-%d %H:%M:%S') if buy_time_obj else "N/A"
+        original_position_type = current_position.get("type", "unknown")
+
+        # 2. 손익 계산
+        total_profit = total_sell_amount - buy_amount
+        total_return_rate = (total_profit / buy_amount) * 100 if buy_amount > 0 else 0
+        
+        # 3. 거래 기록 생성
+        trade_record = {
+            "거래일시": sell_time.strftime('%Y-%m-%d %H:%M:%S'),
+            "포지션": f"장마감 전량매도 ({original_position_type})", # 예: "장마감 전량매도 (basket)"
+            "매수시간": buy_time_str,
+            "매도시간": sell_time.strftime('%Y-%m-%d %H:%M:%S'),
+            "매수금액": buy_amount,
+            "매도금액": total_sell_amount,
+            "손익": total_profit,
+            "수익률(%)": round(total_return_rate, 2),
+            "성공종목수": len(success_orders),
+            "1단계실패종목수": len(failed_orders),
+            "3단계실패종목수": 0 # (clear_all_stocks는 3단계가 별도로 없음)
+        }
+
+        # 4. 종목별 컬럼 추가 (DataFrame 정렬을 위해)
+        # (SAMSUNG_STOCKS는 파일 상단에 import 되어 있어야 합니다)
+        
+        # 4-1. 모든 종목 컬럼 0으로 초기화
+        for stock_name in SAMSUNG_STOCKS.values():
+            trade_record[f"{stock_name}_손익"] = 0
+            trade_record[f"{stock_name}_수익률(%)"] = 0.0
+
+        # 4-2. 만약 청산한 포지션이 'basket'이었다면, 종목별 손익 계산 시도
+        if original_position_type == "basket" and current_position.get("basket_details"):
+            try:
+                # 매수 정보를 (코드: 가격) 맵으로 변환
+                buy_price_map = {
+                    item['code']: item.get('price', 0) 
+                    for item in current_position["basket_details"]
+                }
+                
+                # 2단계에서 성공한 종목들(success_orders)을 기준으로 손익 계산
+                for order in success_orders: # order (name, code, quantity, price, amount)
+                    stock_name = order.get('name')
+                    stock_code = order.get('code')
+                    
+                    if stock_name in SAMSUNG_STOCKS.values():
+                        buy_price = buy_price_map.get(stock_code, 0)
+                        sell_price = order.get('price', 0)
+                        quantity = order.get('quantity', 0)
+                        
+                        if buy_price > 0 and quantity > 0:
+                            stock_buy_amount = buy_price * quantity
+                            stock_sell_amount = sell_price * quantity # order['amount']와 동일
+                            stock_profit = stock_sell_amount - stock_buy_amount
+                            stock_return = (stock_profit / stock_buy_amount) * 100
+                            
+                            trade_record[f"{stock_name}_손익"] = stock_profit
+                            trade_record[f"{stock_name}_수익률(%)"] = round(stock_return, 2)
+            except Exception as e:
+                print(f"   ⚠️ [4.5단계] 바스켓 종목별 손익 계산 중 오류: {e}")
         
         # 5. 최종 결과 출력
         print(f"\n{'='*80}")
