@@ -819,11 +819,11 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
         
         # STEP 5: 매매 조건 체크 및 실행
         
-        # 조건 1: diff >= -5 and position == "none" → 바스켓 매수
+        # 조건 1: diff >= +시그마 and position == "none" → 바스켓 매수
         if diff >= -5 and position == "none":
             if cached_basket_quantities is not None:
                 print(f"\n{'='*80}")
-                print(f"⚡ [{timestamp}] [조건 1 충족] diff >= -5 & 포지션 없음 → 바스켓 매수")
+                print(f"⚡ [{timestamp}] [조건 1 충족] diff >= +시그마 & 포지션 없음 → 바스켓 매수")
                 print(f"{'='*80}")
                 
                 live_basket_prices = basket_ws.get_current_prices()
@@ -851,10 +851,10 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
             else:
                 print(f"[{timestamp}] ⚠️  조건 충족하나 바스켓 최적화 대기 중...")
         
-        # 조건 2: diff <= -9 and position == "basket" → 바스켓 매도
+        # 조건 2: diff <= 평균 and position == "basket" → 바스켓 매도
         elif diff <= -9 and position == "basket":
             print(f"\n{'='*80}")
-            print(f"⚡ [{timestamp}] [조건 2 충족] diff <= -9 & 바스켓 보유 → 바스켓 매도")
+            print(f"⚡ [{timestamp}] [조건 2 충족] diff <= 평균 & 바스켓 보유 → 바스켓 매도")
             print(f"{'='*80}")
             
             result = sell_basket(
@@ -877,10 +877,10 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
             
             print(f"{'='*80}\n")
         
-        # 조건 3: diff <= -13 and position == "none" → ETF 매수
+        # 조건 3: diff <= -시그마 and position == "none" → ETF 매수
         elif diff <= -13 and position == "none":
             print(f"\n{'='*80}")
-            print(f"⚡ [{timestamp}] [조건 3 충족] diff <= -13 & 포지션 없음 → ETF 매수")
+            print(f"⚡ [{timestamp}] [조건 3 충족] diff <= -시그마 & 포지션 없음 → ETF 매수")
             print(f"{'='*80}")
             
             result = buy_etf(
@@ -903,10 +903,10 @@ def run_trading_logic(config: KISConfig, basket_ws: BasketWebSocket,
             
             print(f"{'='*80}\n")
         
-        # 조건 4: diff >= -9 and position == "etf" → ETF 매도
+        # 조건 4: diff >= 평균 and position == "etf" → ETF 매도
         elif diff >= -9 and position == "etf":
             print(f"\n{'='*80}")
-            print(f"⚡ [{timestamp}] [조건 4 충족] diff >= -9 & ETF 보유 → ETF 매도")
+            print(f"⚡ [{timestamp}] [조건 4 충족] diff >= 평균 & ETF 보유 → ETF 매도")
             print(f"{'='*80}")
             
             result = sell_etf(
