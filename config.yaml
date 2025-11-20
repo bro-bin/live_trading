@@ -15,4 +15,4 @@ ACNT_PRDT_CD: "01"
 URL_BASE: "https://openapivts.koreainvestment.com:29443"
 
 #디스코드 웹훅 URL
-#DISCORD_WEBHOOK_URL: "https://discordapp.com/api/webhooks/1419648468192071772/oZQC3ZtaWrY6TZLreIh8zVoUNQLHuNRdCFsCHYxzM5UfmJwXNmaUc74oFYX-sgtnds8i"
+DISCORD_WEBHOOK_URL: "https://discordapp.com/api/webhooks/1419648468192071772/oZQC3ZtaWrY6TZLreIh8zVoUNQLHuNRdCFsCHYxzM5UfmJwXNmaUc74oFYX-sgtnds8i"

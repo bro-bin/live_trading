@@ -8,6 +8,28 @@ import pandas as pd
 from datetime import datetime, timedelta
 import os
 # _________________________ PART 1: 클래스 및 함수 정의  __________________________
+# ==============================================================================
+# ========== [수정] 디스코드 웹훅 설정 (초기값 None) ==========
+# ==============================================================================
+# main 함수에서 config.yaml을 읽어와 이 변수에 할당할 것입니다.
+DISCORD_WEBHOOK_URL = None 
+
+def send_discord_alert(message):
+    """디스코드 웹훅으로 메시지 전송"""
+    global DISCORD_WEBHOOK_URL  # 전역 변수 사용 선언
+    
+    # URL이 설정되지 않았으면 전송하지 않음
+    if not DISCORD_WEBHOOK_URL:
+        return
+
+    try:
+        now = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+        payload = {
+            "content": f"`{now}` {message}"
+        }
+        requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=2)
+    except Exception as e:
+        print(f"❌ 디스코드 전송 실패: {e}")
 
 # ==============================================================================
 # ========== Class 1: 기본 설정 및 토큰 관리 ==========
@@ -31,6 +53,10 @@ class KISConfig:
         # 계좌 정보 분리
         self.cano = cfg['CANO']
         self.acnt_prdt_cd = cfg['ACNT_PRDT_CD']
+
+        # [추가] 디스코드 웹훅 URL 로드
+        # config.yaml에 키가 없으면 None 반환
+        self.discord_webhook_url = cfg.get('DISCORD_WEBHOOK_URL', None)
         
         # 실전/모의 판단
         self.is_real = "vts" not in self.base_url.lower()
@@ -220,6 +246,31 @@ class BasketWebSocket:
             
         except Exception as e:
             print(f"❌ 바스켓 웹소켓 연결 실패: {e}")
+            return False
+    
+    def reconnect(self):
+        """웹소켓 재연결 및 재구독"""
+        msg = "🔄 [Basket WS] 재연결 시도 중..."
+        print(f"\n{msg}")
+        send_discord_alert(msg)
+        
+        # 1. 기존 연결 정리
+        self.close()
+        time.sleep(1)  # 소켓 정리 대기
+        
+        # 2. 재연결 시도
+        if self.connect():
+            success_msg = "✅ [Basket WS] 재연결 성공! 재구독을 진행합니다."
+            print(success_msg)
+            send_discord_alert(success_msg)
+            
+            # 3. 재구독
+            self.subscribe()
+            return True
+        else:
+            fail_msg = "❌ [Basket WS] 재연결 실패."
+            print(fail_msg)
+            send_discord_alert(fail_msg)
             return False
     
     def subscribe(self):
@@ -461,6 +512,31 @@ class MonitoringWebSocket:
             
         except Exception as e:
             print(f"❌ 모니터링 웹소켓 연결 실패: {e}")
+            return False
+    
+    def reconnect(self):
+        """웹소켓 재연결 및 재구독"""
+        msg = "🔄 [Monitoring WS] 재연결 시도 중..."
+        print(f"\n{msg}")
+        send_discord_alert(msg)
+        
+        # 1. 기존 연결 정리
+        self.close()
+        time.sleep(1)
+        
+        # 2. 재연결 시도
+        if self.connect():
+            success_msg = "✅ [Monitoring WS] 재연결 성공! ETF 정보를 다시 구독합니다."
+            print(success_msg)
+            send_discord_alert(success_msg)
+            
+            # 3. 재구독
+            self.subscribe()
+            return True
+        else:
+            fail_msg = "❌ [Monitoring WS] 재연결 실패."
+            print(fail_msg)
+            send_discord_alert(fail_msg)
             return False
     
     def subscribe(self):
@@ -915,7 +991,15 @@ if __name__ == "__main__":
         #  1. 설정 및 웹소켓 초기화
         # ==================================================================
         print("🚀 자동매매 프로그램을 시작합니다.")
+        send_discord_alert("📢 **자동매매 프로그램이 시작되었습니다.**") # [추가]
         main_config_obj = KISConfig(config_path='config.yaml')
+
+        if main_config_obj.discord_webhook_url:
+            DISCORD_WEBHOOK_URL = main_config_obj.discord_webhook_url
+            print(f"✅ 디스코드 알림이 활성화되었습니다.")
+            send_discord_alert("📢 **자동매매 프로그램이 시작되었습니다.** (Config 로드 완료)")
+        else:
+            print("⚠️ config.yaml에 'DISCORD_WEBHOOK_URL'이 없어 알림이 전송되지 않습니다.")
         
         main_basket_ws_obj = BasketWebSocket(main_config_obj)
         main_monitoring_ws_obj = MonitoringWebSocket(main_config_obj)
@@ -928,11 +1012,14 @@ if __name__ == "__main__":
             raise Exception("공통 웹소켓 접속키 발급에 실패했습니다.")
         
         if not main_basket_ws_obj.connect():
+            send_discord_alert("❌ 바스켓 WS 초기 연결 실패") # [추가]
             raise Exception("바스켓 웹소켓(BasketWebSocket) 연결에 실패했습니다.")
         
         if not main_monitoring_ws_obj.connect():
+            send_discord_alert("❌ 모니터링 WS 초기 연결 실패") # [추가]
             raise Exception("모니터링 웹소켓(MonitoringWebSocket) 연결에 실패했습니다.")
         
+        send_discord_alert("✅ 모든 웹소켓 연결 완료. 장 시작 대기 중...") # [추가]
         print("\n✅ 모든 웹소켓이 성공적으로 연결되었습니다. 장 시작을 대기합니다.")
 
         # ==================================================================
@@ -952,6 +1039,7 @@ if __name__ == "__main__":
                 print(f"   ... 장 시작 대기 중 (현재: {now_str}, 목표: 09:00:00)", end="\r")
                 time.sleep(1)  # 1초마다 확인
             
+            send_discord_alert(f"☀️ **장 시작! 매매 로직을 가동합니다.**\n오늘의 계좌: {main_config_obj.account_no}")
             print(f"\n☀️  장 시작! (09:00:00) - {datetime.now().strftime('%Y-%m-%d')}")
 
             # ======================================================
@@ -1017,14 +1105,29 @@ if __name__ == "__main__":
                 # ✅ 메인 루프: 1초마다 run_trading_logic 호출
                 while datetime.now().time() <= end_time:
                     loop_start_time = time.monotonic()
+
+                    # ==================================================
+                    # 🚨 [추가] 웹소켓 연결 상태 확인 및 재연결 로직
+                    # ==================================================
+                    # 1. 바스켓 웹소켓 끊김 확인
+                    if not main_basket_ws_obj.is_connected:
+                        print(f"\n⚠️ [경고] 바스켓 웹소켓 연결 끊김 감지!")
+                        main_basket_ws_obj.reconnect()
+                        
+                    # 2. 모니터링 웹소켓 끊김 확인
+                    if not main_monitoring_ws_obj.is_connected:
+                        print(f"\n⚠️ [경고] 모니터링 웹소켓 연결 끊김 감지!")
+                        main_monitoring_ws_obj.reconnect()
                     
+
                     # (순서 3) 매매 로직 함수 호출 (1초마다)
-                    # ✅ 수정: 반환값으로 포지션 업데이트
+                    # 연결이 끊겨있으면 데이터가 갱신되지 않으므로(None), 
+                    # run_trading_logic 내부에서 "데이터 수신 대기 중"으로 처리됨
                     current_position_type = run_trading_logic(
                         main_config_obj, 
                         main_basket_ws_obj, 
                         main_monitoring_ws_obj,
-                        current_position_type  # ✅ 현재 포지션 전달
+                        current_position_type# ✅ 현재 포지션 전달
                     )
                     
                     # 1초 간격 유지
@@ -1040,11 +1143,13 @@ if __name__ == "__main__":
                 # ======================================================
                 # 4. 장 마감
                 # ======================================================
+                send_discord_alert("🌙 **장 마감.** 금일 매매를 종료하고 리소스를 정리합니다.")
                 print(f"\n🌙 장 마감 (15:15:00). 매매 로직을 종료합니다.")
                 
                 # ======================================================
                 # 5. (순서 5) 전량 매도
                 # ======================================================
+                send_discord_alert(f"💾 거래 내역 저장 완료: trade_history_{datetime.now().strftime('%Y%m%d_%H%M')}.csv")
                 print("\n" + "-"*30 + " 5. 전량 매도 " + "-"*30)
                 
                 # 전량 매도용 tr_id 설정 (trading_function.py 참조)
@@ -1139,7 +1244,9 @@ if __name__ == "__main__":
         time.sleep(1)  # 해제 메시지 전송 대기
         
     except Exception as e:
-        print(f"\n\n❌ 치명적인 오류 발생: {e}")
+        msg = f"❌ 치명적인 오류 발생 (프로그램 종료): {e}"
+        print(f"\n\n{msg}")
+        send_discord_alert(msg) # [추가]
         traceback.print_exc()
         
     finally:
